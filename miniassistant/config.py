@@ -236,6 +236,63 @@ def _normalize_discord(discord: Any) -> dict[str, Any] | None:
     }
 
 
+def _normalize_email_account(raw: Any) -> dict[str, Any] | None:
+    """Ein einzelnes E-Mail-Konto normalisieren. Akzeptiert gängige Alias-Feldnamen."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    # username: accept address/email as aliases
+    username = (raw.get("username") or raw.get("address") or raw.get("email") or "").strip()
+    password = (raw.get("password") or "").strip()
+    if not username or not password:
+        return None
+    # nested smtp/imap dicts auflösen (z.B. smtp: {server: ..., port: ...})
+    smtp = raw.get("smtp") if isinstance(raw.get("smtp"), dict) else {}
+    imap = raw.get("imap") if isinstance(raw.get("imap"), dict) else {}
+    # ssl: accept ssl_tls/tls as aliases
+    ssl_val = raw.get("ssl") if raw.get("ssl") is not None else (
+        raw.get("ssl_tls") if raw.get("ssl_tls") is not None else raw.get("tls")
+    )
+    return {
+        "imap_server": (raw.get("imap_server") or imap.get("server") or "").strip(),
+        "imap_port": int(raw.get("imap_port") or imap.get("port") or 993),
+        "smtp_server": (raw.get("smtp_server") or smtp.get("server") or "").strip(),
+        "smtp_port": int(raw.get("smtp_port") or smtp.get("port") or 587),
+        "username": username,
+        "password": password,
+        "ssl": bool(ssl_val if ssl_val is not None else True),
+        "name": (raw.get("name") or username).strip(),
+    }
+
+
+def _normalize_email(data: dict[str, Any]) -> dict[str, Any] | None:
+    """email: { accounts: {name: {...}}, default: name } normalisieren."""
+    raw = data.get("email")
+    if not raw or not isinstance(raw, dict):
+        return None
+    accounts_raw = raw.get("accounts") or {}
+    # Fallback 1: accounts direkt unter email (fehlendes 'accounts:'-Level)
+    if not accounts_raw:
+        accounts_raw = {k: v for k, v in raw.items() if k != "default" and isinstance(v, dict)}
+    # Fallback 2: flat single account (email.address/email/username directly, no account name)
+    if not accounts_raw:
+        acc = _normalize_email_account(raw)
+        if acc:
+            return {"accounts": {"main": acc}, "default": "main"}
+    accounts: dict[str, Any] = {}
+    for k, v in accounts_raw.items():
+        if not k or not isinstance(k, str):
+            continue
+        acc = _normalize_email_account(v)
+        if acc:
+            accounts[k] = acc
+    if not accounts:
+        return None
+    default = (raw.get("default") or "").strip() or next(iter(accounts))
+    if default not in accounts:
+        default = next(iter(accounts))
+    return {"accounts": accounts, "default": default}
+
+
 def _normalize_chat_clients(data: dict[str, Any]) -> dict[str, Any]:
     """Normalisiert chat_clients; migriert top-level matrix: automatisch."""
     cc = data.get("chat_clients") or {}
@@ -373,6 +430,7 @@ def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
         "image_generation": _parse_model_ref_list(data.get("image_generation")),
         "avatar": (data.get("avatar") or "").strip() or None,
         "github_token": (data.get("github_token") or "").strip() or None,
+        "email": _normalize_email(data),
     }
 
 
@@ -435,7 +493,7 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
         "default_search_engine": config.get("default_search_engine"),
         "max_chars_per_file": config.get("max_chars_per_file", DEFAULT_MAX_CHARS_PER_FILE),
         "scheduler": config.get("scheduler") or False,
-        "chat_clients": {k: v for k, v in (config.get("chat_clients") or {}).items() if v} or False,
+        "chat_clients": {k: v for k, v in _normalize_chat_clients(config).items() if v} or False,
         "onboarding_complete": bool(config.get("onboarding_complete", False)),
         "memory": {
             "max_chars_per_line": (config.get("memory") or {}).get("max_chars_per_line", 300),
@@ -457,6 +515,18 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
         out["avatar"] = config["avatar"]
     if config.get("github_token"):
         out["github_token"] = config["github_token"]
+    # Auto-Migration: email unter chat_clients.* → top-level email:
+    cc_raw = config.get("chat_clients") or {}
+    if not config.get("email"):
+        for _client_cfg in cc_raw.values():
+            if isinstance(_client_cfg, dict) and isinstance(_client_cfg.get("email"), dict):
+                _acc = _normalize_email_account(_client_cfg["email"])
+                if _acc:
+                    config = {**config, "email": {"accounts": {"main": _acc}, "default": "main"}}
+                    break
+    email_norm = _normalize_email(config)
+    if email_norm:
+        out["email"] = email_norm
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(out, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     path.chmod(0o600)

@@ -1,5 +1,7 @@
 # Matrix Bot Setup
 
+`chat_clients.matrix` is for the **Matrix bot only** — email config goes under the separate top-level `email:` key, never here.
+
 **Required in config:** `chat_clients.matrix` with at least `homeserver` (not `homeserver_url`), `user_id`, `token` (not `access_token`; the value comes from the login response's `access_token`). Include `enabled: true` (optional, default true). Optionally `bot_name` (display name, default "MiniAssistant") and `encrypted_rooms: true` (default; set to false for unencrypted-only). For E2EE, `device_id` from the login response is required (not the default "miniassistant" if the server issued another one).
 
 **If user has no token or device_id yet**, show them how to get both in one request:

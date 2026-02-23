@@ -32,7 +32,8 @@ Alle Einstellungen sind **optional**. Was nicht gesetzt ist, nutzt sinnvolle Def
 - **max_chars_per_file** – Zeichenlimit pro Agent-Datei im System-Prompt
 - **scheduler** – (optional) Geplante Jobs (Cron/„in N Minuten“) via Tool `schedule`
 - **chat_clients** – (optional) Chat-Clients: Matrix und Discord
-- **onboarding_complete** – (intern) Wird **nur** auf `true` gesetzt, wenn in der Web-UI beim Onboarding/Setup auf **„Speichern“** geklickt wurde. Das CLI-`config` legt nur Config und Agent-Dateien an und setzt dieses Flag **nicht** – so bleibt der Onboarding-Button sichtbar, bis der Nutzer das Setup in der Web-UI abschließt und speichert. Default: `false`.
+- **email** – (optional) E-Mail-Konten (IMAP/SMTP). Mehrere Konten möglich; der Assistent kann Mails lesen, schreiben und senden über die eingebauten `send_email` und `read_email` Tools.
+- **onboarding_complete** – (intern) Wird **nur** auf `true` gesetzt, wenn in der Web-UI beim Onboarding/Setup auf **„Speichern”** geklickt wurde. Das CLI-`config` legt nur Config und Agent-Dateien an und setzt dieses Flag **nicht** – so bleibt der Onboarding-Button sichtbar, bis der Nutzer das Setup in der Web-UI abschließt und speichert. Default: `false`.
 - **memory** – (optional) Einstellungen für den Memory-Auszug im System-Prompt (z. B. `max_chars_per_line`).
 - **chat** – (optional) Smart Compacting: `context_quota` (Anteil von `num_ctx` der genutzt wird, Default 0.85). Bei Überschreitung wird der Chatverlauf automatisch komprimiert.
 - **vision** – (optional) Vision-Modell für Bildanalyse. Kann Modellname (String) oder Objekt mit `model` und `num_ctx` sein.
@@ -366,6 +367,63 @@ curl --request POST \
 
 ---
 
+## 7b. email
+
+E-Mail-Konten werden unter `email.accounts` konfiguriert. Der Assistent nutzt die eingebauten `send_email` und `read_email` Tools — kein Python-Code nötig. Mails lesen (IMAP), schreiben und senden (SMTP) funktioniert direkt über Tool-Aufrufe.
+
+**Mehrere Konten:** Jedes Konto hat einen frei wählbaren Namen. `default` gibt an, welches Konto standardmäßig genutzt wird.
+
+| Schlüssel | Typ | Pflicht? | Default | Beschreibung |
+|-----------|-----|----------|---------|--------------|
+| `email.default` | string | nein | (erstes Konto) | Name des Standard-Kontos. |
+| `email.accounts.<name>.imap_server` | string | ja | — | IMAP-Server (z. B. `imap.gmail.com`). |
+| `email.accounts.<name>.imap_port` | integer | nein | `993` | IMAP-Port. |
+| `email.accounts.<name>.smtp_server` | string | ja | — | SMTP-Server (z. B. `smtp.gmail.com`). |
+| `email.accounts.<name>.smtp_port` | integer | nein | `587` | SMTP-Port (587 = STARTTLS, 465 = SSL). |
+| `email.accounts.<name>.username` | string | ja | — | E-Mail-Adresse / Benutzername. |
+| `email.accounts.<name>.password` | string | ja | — | Passwort oder App-Passwort. |
+| `email.accounts.<name>.ssl` | boolean | nein | `true` | `true` = SSL/TLS; STARTTLS wird automatisch verwendet. |
+| `email.accounts.<name>.name` | string | nein | (username) | Anzeigename (z. B. `Max Mustermann`). |
+
+**Beispiel (zwei Konten):**
+
+```yaml
+email:
+  default: privat
+  accounts:
+    privat:
+      imap_server: imap.gmail.com
+      imap_port: 993
+      smtp_server: smtp.gmail.com
+      smtp_port: 587
+      username: ich@gmail.com
+      password: app_passwort_hier
+      ssl: true
+      name: Max Mustermann
+    arbeit:
+      imap_server: imap.firma.de
+      imap_port: 993
+      smtp_server: smtp.firma.de
+      smtp_port: 587
+      username: max@firma.de
+      password: firmen_passwort
+      ssl: true
+```
+
+**Was der Assistent damit kann:**
+- Mails lesen via `read_email` Tool (UNSEEN, ALL, nach Absender/Betreff filtern)
+- Mails verfassen und senden via `send_email` Tool — inklusive automatisch generiertem Betreff
+- Mails regelmäßig prüfen (via `schedule` + `read_email`) und neue Nachrichten zusammenfassen
+- Auto-Antworten einrichten (für bestimmte Absender via `schedule`)
+
+**Hinweise:**
+- Gmail: App-Passwort verwenden (nicht das Hauptpasswort) — 2FA muss aktiviert sein.
+- Outlook/Office365: SMTP-Server `smtp.office365.com`, Port `587`.
+- Port 465 (SSL-only): Konfiguration mit `ssl: true` und Port `465` nutzt `SMTP_SSL` statt STARTTLS.
+- Zugangsdaten nie per Hand in die Config-Datei schreiben — immer über `save_config` (Assistent kann das für dich erledigen).
+
+---
+
 ## 8. Vollstaendiges Beispiel (minimal)
 
 ```yaml
@@ -444,6 +502,19 @@ memory:
 
 chat:
   context_quota: 0.85
+
+email:
+  default: privat
+  accounts:
+    privat:
+      imap_server: imap.gmail.com
+      imap_port: 993
+      smtp_server: smtp.gmail.com
+      smtp_port: 587
+      username: ich@gmail.com
+      password: app_passwort_hier
+      ssl: true
+      name: Max Mustermann
 ```
 
 ---
@@ -455,6 +526,7 @@ chat:
 - **providers.\<name\>.models.default** fehlt: Nutzer muss mit `/model MODELLNAME` waehlen.
 - **agent_dir** fehlt: Default-Pfad unter `~/.config/miniassistant/agent`.
 - **chat_clients** fehlt: Kein Matrix/Discord, nur CLI und Web-UI.
+- **email** fehlt: Keine E-Mail-Funktion. Konto hinzufügen mit `save_config` — der Assistent führt dich durch die Einrichtung.
 
 Alles ist optional; eine leere oder minimale Config ist ausreichend.
 

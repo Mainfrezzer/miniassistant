@@ -197,11 +197,15 @@ def _persistence_section(config: dict[str, Any]) -> str:
             f"| What | Where | How | Format |\n"
             f"|------|-------|-----|--------|\n"
             f"| User preferences, notes, reminders | `{prefs_path}/` | `exec` (write file) | `.md` (Markdown) |\n"
-            f"| System config (providers, models, server, scheduler) | `config.yaml` | `save_config` tool | YAML (merged) |\n\n"
+            f"| System config (providers, models, server, scheduler, ...) | `config.yaml` | `save_config` tool | YAML (merged) |\n\n"
+            f"**Top-level config keys — each is independent:**\n"
+            f"- `providers` / `server` / `scheduler` — AI and server settings\n"
+            f"- `chat_clients.matrix` / `chat_clients.discord` — chat bot connections (Matrix, Discord) — **NOT email**\n"
+            f"- `email` — email accounts (IMAP/SMTP) — **completely separate from chat_clients**\n\n"
             f"**Rules:**\n"
             f"- **Trigger phrases:** When the user says 'merk dir', 'speicher dir', 'remember', 'save', 'notier dir' → "
             f"write a `.md` file to `{prefs_path}/` via `exec`. Filename = topic (e.g. `wetter.md`, `backup.md`).\n"
-            f"- `save_config` is **ONLY** for system config (providers, models, server). **NEVER** use it for user preferences.\n"
+            f"- `save_config` is **ONLY** for system config. **NEVER** use it for user preferences.\n"
             f"- Prefs are plain Markdown. They are loaded into your system prompt at session start (see \"Stored preferences\" above) — every line costs context tokens.\n"
             f"- **Keep prefs short:** Only key facts, key-value style (e.g. `Ort: Lunz am See`). No long explanations, no full instructions. Max 5-10 lines per file.\n"
             f"- **Before saving:** Look at your \"Stored preferences\" section above — if a file for that topic already exists, update it instead of creating a duplicate.\n"
@@ -286,7 +290,8 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         "| `VISION.md` | Image analysis |\n"
         "| `IMAGE_GENERATION.md` | Image generation |\n"
         "| `DEBATE.md` | Multi-round AI debate |\n"
-        "| `AVATARS.md` | Bot profile picture |\n\n"
+        "| `AVATARS.md` | Bot profile picture |\n"
+        "| `EMAIL.md` | IMAP/SMTP, multi-account, tracking, auto-reply |\n\n"
     )
 
 
@@ -369,6 +374,16 @@ def _tools_section(config: dict[str, Any]) -> str:
         "`$GH_TOKEN` is already injected in every exec call — no setup needed. "
         f"Read `{docs_prefix}GITHUB.md` for curl examples and **repo tracking** setup."
     )
+    # Email: nur anzeigen wenn konfiguriert
+    from miniassistant.tools import _get_email_account_names
+    email_accounts = _get_email_account_names(config)
+    if email_accounts:
+        accounts_str = ", ".join(f'"{a}"' for a in email_accounts)
+        lines.append(
+            f"- **Email:** Configured accounts: {accounts_str}. "
+            f"Use the `send_email` tool to send emails and `read_email` to read emails. "
+            f"Credentials are loaded automatically — NEVER ask the user for login data, NEVER hardcode credentials."
+        )
     lines.append("- `check_url`: only when user explicitly asks to verify/check links.")
     lines.append(
         "- `read_url`: Read the actual content of a web page. Use this to read URLs found during research, "

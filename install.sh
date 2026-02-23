@@ -34,17 +34,17 @@ fi
 # Für Matrix-E2EE: libolm-dev, cmake, make, python3-dev (Header für C-Erweiterungen wie python-olm)
 echo "System-Pakete (python3, venv, pip; für Matrix-E2EE: libolm-dev, cmake, make, python3-dev)..."
 if command -v apt-get >/dev/null 2>&1; then
-  ( $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip python3-dev libolm-dev cmake build-essential ) 2>/dev/null || {
-    ( $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip python3-dev libolm-dev cmake make ) 2>/dev/null || \
-    ( $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip ) 2>/dev/null || true
+  ( $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip python3-dev python3-yaml libolm-dev cmake build-essential ) 2>/dev/null || {
+    ( $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip python3-dev python3-yaml libolm-dev cmake make ) 2>/dev/null || \
+    ( $SUDO apt-get update -qq && $SUDO apt-get install -y python3 python3-venv python3-pip python3-yaml ) 2>/dev/null || true
     echo "  Hinweis: Installation fehlgeschlagen oder abgebrochen (z. B. ohne sudo). Für E2EE: libolm-dev, cmake, make, python3-dev."
   }
 elif command -v dnf >/dev/null 2>&1; then
-  ( $SUDO dnf install -y python3 python3-virtualenv python3-pip olm-devel cmake make ) 2>/dev/null || \
-  ( $SUDO dnf install -y python3 python3-virtualenv python3-pip ) 2>/dev/null || true
+  ( $SUDO dnf install -y python3 python3-virtualenv python3-pip python3-pyyaml olm-devel cmake make ) 2>/dev/null || \
+  ( $SUDO dnf install -y python3 python3-virtualenv python3-pip python3-pyyaml ) 2>/dev/null || true
 elif command -v apk >/dev/null 2>&1; then
-  ( $SUDO apk add python3 py3-pip py3-venv olm-dev cmake make ) 2>/dev/null || \
-  ( $SUDO apk add python3 py3-pip py3-venv ) 2>/dev/null || true
+  ( $SUDO apk add python3 py3-pip py3-venv py3-yaml olm-dev cmake make ) 2>/dev/null || \
+  ( $SUDO apk add python3 py3-pip py3-venv py3-yaml ) 2>/dev/null || true
 else
   echo "  Unbekannter Paketmanager. Bitte manuell: python3, python3-venv, python3-pip; für E2EE: libolm, cmake, make."
 fi
@@ -125,15 +125,19 @@ if ! "$VENV_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
   "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || true
 fi
 
-# Abhängigkeiten (aus pyproject.toml inkl. optionale Extras: matrix, scheduler)
+# Abhängigkeiten (aus pyproject.toml inkl. optionale Extras: matrix, discord, scheduler)
 echo "Installiere Abhängigkeiten..."
 "$VENV_DIR/bin/python3" -m pip install -q --upgrade pip
-"$VENV_DIR/bin/python3" -m pip install -q -e '.[matrix,scheduler]'
+"$VENV_DIR/bin/python3" -m pip install -q -e '.[matrix,discord,scheduler]'
 
 # Kurz prüfen, ob matrix-nio im selben venv importierbar ist (für Matrix-Bot)
 if ! "$VENV_DIR/bin/python3" -c "import nio" 2>/dev/null; then
   echo "Hinweis: matrix-nio (Matrix-Bot) konnte nicht geladen werden. Erneut installieren mit:"
-  echo "  $VENV_DIR/bin/python3 -m pip install -e '.[matrix,scheduler]'"
+  echo "  $VENV_DIR/bin/python3 -m pip install -e '.[matrix,discord,scheduler]'"
+fi
+# Discord prüfen
+if ! "$VENV_DIR/bin/python3" -c "import discord" 2>/dev/null; then
+  echo "Hinweis: discord.py konnte nicht geladen werden. Erneut: $VENV_DIR/bin/python3 -m pip install -e '.[discord]'"
 fi
 # Matrix-E2EE (Entschlüsselung): pip install matrix-nio[e2e] – braucht libolm, cmake, make (s. o. System-Pakete)
 E2EE_OK=0

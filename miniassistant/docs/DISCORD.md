@@ -1,5 +1,7 @@
 # Discord Bot Setup
 
+`chat_clients.discord` is for the **Discord bot only** — email config goes under the separate top-level `email:` key, never here.
+
 **Required in config:** `chat_clients.discord.bot_token`. Include `enabled: true` (optional, default true; use `false` to disable the bot).
 
 **If user has no bot_token yet**, tell them:

@@ -35,6 +35,23 @@ from miniassistant.tools import run_exec, web_search as tool_web_search, check_u
 from miniassistant.memory import append_exchange
 import miniassistant.agent_actions_log as _aal
 import miniassistant.context_log as _ctx_log
+import re as _re
+
+# Regex für <think>...</think> Tags die manche Modelle (phi4-reasoning, deepseek-r1)
+# inline im Content ausgeben wenn think nicht als API-Parameter gesendet wird.
+_THINK_TAG_RE = _re.compile(r"<think>(.*?)</think>", _re.DOTALL)
+
+
+def _strip_think_tags(content: str) -> tuple[str, str]:
+    """Extrahiert <think>...</think> Blöcke aus Content.
+    Returns: (bereinigter_content, thinking_text)"""
+    if "<think>" not in content:
+        return content, ""
+    thinking_parts = _THINK_TAG_RE.findall(content)
+    cleaned = _THINK_TAG_RE.sub("", content).strip()
+    thinking = "\n".join(t.strip() for t in thinking_parts if t.strip())
+    return cleaned, thinking
+
 
 try:
     from miniassistant.scheduler import add_scheduled_job, list_scheduled_jobs, remove_scheduled_job
@@ -921,6 +938,42 @@ def _run_tool(
         if result.get("ok"):
             return result.get("content", "")
         return f"Error reading URL: {result.get('error', 'unknown error')}"
+    if name == "send_email":
+        from miniassistant.tools import send_email as tool_send_email
+        to = arguments.get("to", "").strip()
+        subject = arguments.get("subject", "").strip()
+        body = arguments.get("body", "").strip()
+        account = arguments.get("account", "").strip() or None
+        if not to:
+            return "send_email requires 'to'"
+        if not subject:
+            return "send_email requires 'subject'"
+        if not body:
+            return "send_email requires 'body'"
+        result = tool_send_email(config, to, subject, body, account=account)
+        if result.get("ok"):
+            return result.get("message", "Email sent.")
+        return f"send_email failed: {result.get('error', 'unknown error')}"
+    if name == "read_email":
+        from miniassistant.tools import read_email as tool_read_email
+        folder = arguments.get("folder", "").strip() or "INBOX"
+        count = int(arguments.get("count", 5) or 5)
+        filter_criteria = arguments.get("filter", "").strip() or "UNSEEN"
+        account = arguments.get("account", "").strip() or None
+        # mark_read: default True for scheduled tasks (so UNSEEN works as tracker),
+        # can be explicitly set to false to keep emails unread
+        mark_read_raw = arguments.get("mark_read")
+        mark_read = True if mark_read_raw is None else bool(mark_read_raw)
+        result = tool_read_email(config, folder=folder, count=count, filter_criteria=filter_criteria, account=account, mark_read=mark_read)
+        if not result.get("ok"):
+            return f"read_email failed: {result.get('error', 'unknown error')}"
+        emails = result.get("emails", [])
+        if not emails:
+            return "No emails found."
+        lines = []
+        for e in emails:
+            lines.append(f"From: {e.get('from', '')}\nTo: {e.get('to', '')}\nDate: {e.get('date', '')}\nSubject: {e.get('subject', '')}\n{e.get('body', '')}\n---")
+        return "\n".join(lines)
     if name == "send_image":
         from pathlib import Path as _Path
         image_path = arguments.get("image_path", "").strip()
@@ -2233,7 +2286,23 @@ def chat_round(
             )
         except Exception:
             pass
-    return total_content.strip(), total_thinking.strip(), msgs_final, debug_info, switch_info
+    # Strip inline <think> tags from content (phi4-reasoning, deepseek-r1 ohne API-think)
+    _final_content = total_content.strip()
+    _final_thinking = total_thinking.strip()
+    if "<think>" in _final_content:
+        _cleaned, _extra_thinking = _strip_think_tags(_final_content)
+        _final_content = _cleaned
+        if _extra_thinking:
+            _final_thinking = (_final_thinking + "\n" + _extra_thinking).strip() if _final_thinking else _extra_thinking
+    # Auch in der Konversationshistorie <think> Tags bereinigen (spart Kontext-Tokens)
+    if msgs_final:
+        for _m in msgs_final:
+            if _m.get("role") == "assistant" and "<think>" in (_m.get("content") or ""):
+                _mc, _mt = _strip_think_tags(_m["content"])
+                _m["content"] = _mc
+                if _mt and not _m.get("thinking"):
+                    _m["thinking"] = _mt
+    return _final_content, _final_thinking, msgs_final, debug_info, switch_info
 
 
 def chat_round_stream(
@@ -2401,7 +2470,12 @@ def chat_round_stream(
                 }
             # send_image war erfolgreich → Content unterdrücken (Bild IST die Antwort)
             _done_content = "" if _sent_image else total_content.strip()
-            yield {"type": "done", "thinking": total_thinking.strip(), "content": _done_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info}
+            _done_thinking = total_thinking.strip()
+            if "<think>" in _done_content:
+                _done_content, _et = _strip_think_tags(_done_content)
+                if _et:
+                    _done_thinking = (_done_thinking + "\n" + _et).strip() if _done_thinking else _et
+            yield {"type": "done", "thinking": _done_thinking, "content": _done_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info}
             return
 
         _tool_names = [n for n, _ in tool_calls]
@@ -2423,8 +2497,13 @@ def chat_round_stream(
                 total_content += "\n\n*(Verarbeitung abgebrochen)*"
                 msgs.append({"role": "assistant", "content": total_content.strip()})
                 _final_content = "" if _sent_image else total_content.strip()
+                _final_thinking = total_thinking.strip()
+                if "<think>" in _final_content:
+                    _final_content, _et = _strip_think_tags(_final_content)
+                    if _et:
+                        _final_thinking = (_final_thinking + "\n" + _et).strip() if _final_thinking else _et
                 yield {"type": "content", "delta": "\n\n*(Verarbeitung abgebrochen)*"}
-                yield {"type": "done", "thinking": total_thinking.strip(), "content": _final_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info}
+                yield {"type": "done", "thinking": _final_thinking, "content": _final_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info}
                 return
         for name, args in tool_calls:
             yield {"type": "status", "message": f"Tool: {name}"}
@@ -2485,7 +2564,12 @@ def chat_round_stream(
 
     # send_image war erfolgreich → Content unterdrücken (Bild IST die Antwort)
     _final_content = "" if _sent_image else total_content.strip()
-    yield {"type": "done", "thinking": total_thinking.strip(), "content": _final_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info}
+    _final_thinking = total_thinking.strip()
+    if "<think>" in _final_content:
+        _final_content, _et = _strip_think_tags(_final_content)
+        if _et:
+            _final_thinking = (_final_thinking + "\n" + _et).strip() if _final_thinking else _et
+    yield {"type": "done", "thinking": _final_thinking, "content": _final_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info}
 
 
 def is_chat_command(user_input: str) -> bool:

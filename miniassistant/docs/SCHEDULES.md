@@ -47,7 +47,22 @@ Before deleting or cleaning up files in the workspace:
 
 Files that are typically protected:
 - `github-track-*.md` — GitHub repo tracking (see `GITHUB.md`)
+- `email-track-*.md` — Email monitoring (see `EMAIL.md`)
 - `*-plan.md` — active task plans
+
+## Email schedule examples
+
+User says "prüf meine Mails alle 30 Minuten":
+```
+schedule(action='create', when='*/30 * * * *',
+  prompt='Check email account "privat" for new messages. Read EMAIL.md for IMAP instructions. Track reported messages in WORKSPACE/email-track-privat.md. Send a summary for each new message (sender, subject, 2-sentence preview). If no new messages: do nothing, send nothing.')
+```
+
+User says "richte einen Auto-Responder ein für Mails von chef@firma.de":
+```
+schedule(action='create', when='*/15 * * * *',
+  prompt='Check email account "arbeit" for new messages. Read EMAIL.md for auto-reply instructions. Auto-reply to emails from chef@firma.de: "Nachricht erhalten, ich melde mich in 24h." Track replied UIDs in WORKSPACE/email-track-arbeit.md. Never reply twice to the same message.')
+```
 
 ## German synonyms the user might say
 "geplanter Job", "Benachrichtigung", "Erinnerung", "Aufgabe", "Automatisierung", "täglich", "wöchentlich", "morgens"

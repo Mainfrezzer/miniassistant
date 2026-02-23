@@ -57,19 +57,27 @@ def model_supports_thinking(base_url: str, name: str) -> bool:
 
 
 def model_supports_tools(base_url: str, name: str) -> bool:
-    """True wenn das Modell Tool/Function-Calling unterstützt. Sonst Tools nicht mitschicken (z. B. DeepSeek-R1 offiziell → 400)."""
+    """True wenn das Modell Tool/Function-Calling unterstützt. Sonst Tools nicht mitschicken (z. B. DeepSeek-R1 offiziell → 400).
+    Default: True — die meisten modernen Modelle unterstützen Tools, melden es aber nicht in capabilities.
+    Nur explizit bekannte Ausnahmen werden geblockt."""
+    n = (name or "").lower()
+    # Blocklist: Modelle die bei Tool-Calls 400/Fehler werfen
+    _NO_TOOLS = ("deepseek-r1", "phi4-reasoning")
+    for pattern in _NO_TOOLS:
+        if pattern in n:
+            # Ausnahme: Community-Varianten mit explizitem Tool-Support
+            if "tool-calling" in n or "tool_calling" in n:
+                return True
+            return False
     try:
         info = show_model(base_url, name)
         caps = info.get("capabilities") or []
         if isinstance(caps, list) and ("tool_use" in caps or "tools" in caps):
             return True
-        # Blocklist: offizielle DeepSeek-R1 ohne Tool-Support (Community-Varianten wie deepseek-r1-tool-calling haben es)
-        n = (name or "").lower()
-        if "deepseek-r1" in n and "tool-calling" not in n and "tool_calling" not in n:
-            return False
     except Exception:
         pass
-    return False
+    # Default True — die meisten Modelle (qwen3, gemma3, llama3, mistral, etc.) können Tools
+    return True
 
 
 def model_supports_vision(base_url: str, name: str) -> bool:
@@ -393,6 +401,46 @@ def _tools_schema(
             },
         },
     })
+    # Email tools: nur anzeigen wenn konfiguriert
+    from miniassistant.tools import _get_email_account_names
+    _email_accounts = _get_email_account_names(config)
+    if _email_accounts:
+        _accs_desc = ", ".join(_email_accounts)
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "send_email",
+                "description": f"Send an email. Configured accounts: {_accs_desc}. Credentials are loaded automatically — NEVER ask the user for login data.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string", "description": "Recipient email address"},
+                        "subject": {"type": "string", "description": "Email subject line"},
+                        "body": {"type": "string", "description": "Email body text (plain text)"},
+                        "account": {"type": "string", "description": f"Optional: account name ({_accs_desc}). Omit for default."},
+                    },
+                    "required": ["to", "subject", "body"],
+                },
+            },
+        })
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "read_email",
+                "description": f"Read emails from mailbox. Configured accounts: {_accs_desc}. Credentials loaded automatically. Use filter='UNSEEN' for new/unread emails (default). With mark_read=true (default), fetched emails are marked as read so they won't appear again on the next UNSEEN check — perfect for scheduled email monitoring.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
+                        "count": {"type": "integer", "description": "Number of emails to fetch (default: 5)"},
+                        "filter": {"type": "string", "description": "IMAP search criteria: UNSEEN (default), ALL, SEEN, FROM \"address\", SUBJECT \"text\""},
+                        "account": {"type": "string", "description": f"Optional: account name ({_accs_desc}). Omit for default."},
+                        "mark_read": {"type": "boolean", "description": "Mark fetched emails as read on server (default: true). Set false to keep emails unread."},
+                    },
+                    "required": [],
+                },
+            },
+        })
     schema.append({
         "type": "function",
         "function": {

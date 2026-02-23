@@ -116,6 +116,27 @@ subagents:                                 # global subagent list (worker models
 
 fallbacks:                                 # global fallback models on error
   - qwen3:14b
+
+email:
+  default: privat                          # which account to use when not specified
+  accounts:
+    privat:
+      imap_server: imap.gmail.com
+      imap_port: 993
+      smtp_server: smtp.gmail.com
+      smtp_port: 587
+      username: ich@gmail.com
+      password: app_passwort
+      ssl: true
+      name: Max Mustermann              # display name (optional, defaults to username)
+    arbeit:
+      imap_server: imap.firma.de
+      imap_port: 993
+      smtp_server: smtp.firma.de
+      smtp_port: 587
+      username: max@firma.de
+      password: passwort
+      ssl: true
 ```
 
 ## basic_rules (editable behavior rules)
@@ -287,3 +308,51 @@ search_engines:
   vpn:
     url: https://search-vpn.example.org
 ```
+
+## Email setup (IMAP/SMTP)
+
+Email uses the built-in `send_email` and `read_email` tools — no Python scripts needed.
+
+**User says "richte mein Gmail ein" → ask for:** username (email address), password (App Password for Gmail), display name (optional). Then save:
+
+```yaml
+email:
+  default: privat
+  accounts:
+    privat:
+      imap_server: imap.gmail.com
+      imap_port: 993
+      smtp_server: smtp.gmail.com
+      smtp_port: 587
+      username: ich@gmail.com
+      password: app_passwort_hier
+      ssl: true
+      name: Max Mustermann
+```
+
+**Add a second account** (keep existing, just add the new one):
+```yaml
+email:
+  accounts:
+    arbeit:
+      imap_server: imap.firma.de
+      imap_port: 993
+      smtp_server: smtp.firma.de
+      smtp_port: 587
+      username: max@firma.de
+      password: firmen_passwort
+      ssl: true
+```
+
+**Change default account:**
+```yaml
+email:
+  default: arbeit
+```
+
+**Provider quick reference:**
+- Gmail: `imap.gmail.com` / `smtp.gmail.com`, ports 993/587, use App Password (not main password)
+- Outlook/Office365: `outlook.office365.com` / `smtp.office365.com`, ports 993/587
+- Port 465 (SSL-only): set `ssl: true` and `smtp_port: 465` — uses `SMTP_SSL` instead of STARTTLS
+
+**CRITICAL:** Always use `send_email` and `read_email` tools — never write Python scripts for email. Credentials are loaded automatically from config. Read EMAIL.md for tool usage details.

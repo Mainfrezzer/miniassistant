@@ -1,6 +1,6 @@
 """
 Tools: exec (Shell-Befehl), web_search (SearXNG), check_url (URL-Erreichbarkeit),
-read_url (URL-Inhalt als Text lesen).
+read_url (URL-Inhalt als Text lesen), send_email (SMTP), read_email (IMAP).
 exec führt Befehle aus; Root-Info steht im System-Prompt (KI weiß ob sudo nötig).
 """
 from __future__ import annotations
@@ -230,3 +230,197 @@ def read_url(url: str, max_chars: int = 8000, timeout: float = 15.0) -> dict[str
         }
     except Exception as e:
         return {"ok": False, "content": "", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Email – send_email (SMTP) und read_email (IMAP)
+# ---------------------------------------------------------------------------
+
+def _get_email_account(config: dict[str, Any], account: str | None = None) -> dict[str, Any] | None:
+    """Resolve email account from config. Supports three formats:
+    Format 1: email.accounts.{name}  (documented, multi-account)
+    Format 2: email.{name}.{...}     (nested by account name, e.g. email.main.email)
+    Format 3: email.address/email    (flat, single account — treated as 'main')
+    Also normalizes 'address' key to 'email' for consistency.
+    """
+    email_cfg = config.get("email") or {}
+    if not email_cfg:
+        return None
+
+    # Format 1: email.accounts.{name}
+    accounts = email_cfg.get("accounts")
+    if accounts and isinstance(accounts, dict):
+        default = email_cfg.get("default", next(iter(accounts), None))
+        name = account or default
+        acc = accounts.get(name) if name else None
+        return _normalize_email_acc(acc) if acc else None
+
+    # Format 2: email.{name}.{...} (skip meta keys, look for dict values)
+    meta_keys = {"default", "accounts"}
+    account_keys = [k for k in email_cfg if k not in meta_keys and isinstance(email_cfg[k], dict)]
+    if account_keys:
+        default = email_cfg.get("default", account_keys[0])
+        name = account or default
+        acc = email_cfg.get(name)
+        return _normalize_email_acc(acc) if acc else None
+
+    # Format 3: flat — email.address or email.email directly (single account)
+    if email_cfg.get("address") or email_cfg.get("email") or email_cfg.get("username"):
+        return _normalize_email_acc(email_cfg)
+
+    return None
+
+
+def _normalize_email_acc(acc: dict[str, Any]) -> dict[str, Any]:
+    """Ensure the account dict has an 'email' key (normalize from 'address'/'username' if needed)."""
+    if "email" not in acc:
+        addr = acc.get("address") or acc.get("username") or ""
+        if addr:
+            acc = dict(acc)
+            acc["email"] = addr
+    return acc
+
+
+def _get_email_account_names(config: dict[str, Any]) -> list[str]:
+    """Return list of configured email account names."""
+    email_cfg = config.get("email") or {}
+    if not email_cfg:
+        return []
+    # Format 1
+    accounts = email_cfg.get("accounts")
+    if accounts and isinstance(accounts, dict):
+        return list(accounts.keys())
+    # Format 2
+    meta_keys = {"default", "accounts"}
+    account_keys = [k for k in email_cfg if k not in meta_keys and isinstance(email_cfg[k], dict)]
+    if account_keys:
+        return account_keys
+    # Format 3: flat single account
+    if email_cfg.get("address") or email_cfg.get("email") or email_cfg.get("username"):
+        return ["main"]
+    return []
+
+
+def send_email(config: dict[str, Any], to: str, subject: str, body: str, account: str | None = None) -> dict[str, Any]:
+    """Send an email via SMTP using credentials from config."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    acc = _get_email_account(config, account)
+    if not acc:
+        return {"ok": False, "error": "No email account configured. Set up email in config.yaml."}
+
+    sender = acc.get("email") or acc.get("username", "")
+    password = acc.get("password", "")
+    if not sender or not password:
+        return {"ok": False, "error": "Email account missing 'email'/'username' or 'password'."}
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = acc.get("name", sender) + f" <{sender}>" if acc.get("name") else sender
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        smtp_server = acc.get("smtp_server", "smtp.gmail.com")
+        smtp_port = int(acc.get("smtp_port", 587))
+
+        # Port 465 = implicit SSL (SMTP_SSL), Port 587 = STARTTLS
+        # ssl/use_ssl only forces SMTP_SSL for non-standard ports
+        use_ssl = acc.get("ssl") or acc.get("use_ssl")
+        if smtp_port == 465 or (use_ssl and smtp_port != 587):
+            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+                server.login(sender, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls()
+                server.login(sender, password)
+                server.send_message(msg)
+
+        return {"ok": True, "message": f"Email sent to {to}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def read_email(
+    config: dict[str, Any],
+    folder: str = "INBOX",
+    count: int = 5,
+    filter_criteria: str = "UNSEEN",
+    account: str | None = None,
+    mark_read: bool = True,
+) -> dict[str, Any]:
+    """Read emails via IMAP using credentials from config.
+    mark_read=True (default): marks fetched emails as SEEN so they don't appear again with UNSEEN filter.
+    mark_read=False: uses BODY.PEEK[] so emails stay unread on the server.
+    """
+    import imaplib
+    import email as email_mod
+    from email.header import decode_header
+
+    acc = _get_email_account(config, account)
+    if not acc:
+        return {"ok": False, "error": "No email account configured.", "emails": []}
+
+    sender = acc.get("email") or acc.get("username", "")
+    password = acc.get("password", "")
+    if not sender or not password:
+        return {"ok": False, "error": "Email account missing credentials.", "emails": []}
+
+    try:
+        imap_server = acc.get("imap_server", "imap.gmail.com")
+        imap_port = int(acc.get("imap_port", 993))
+
+        mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+        mail.login(sender, password)
+        mail.select(folder)
+
+        _, data = mail.search(None, filter_criteria)
+        ids = data[0].split()
+
+        # BODY.PEEK[] = fetch without marking as read; RFC822 = fetch and mark as read
+        fetch_cmd = "(RFC822)" if mark_read else "(BODY.PEEK[])"
+
+        emails: list[dict[str, str]] = []
+        for uid in ids[-count:]:
+            _, msg_data = mail.fetch(uid, fetch_cmd)
+            raw = msg_data[0][1]
+            msg = email_mod.message_from_bytes(raw)
+
+            # Decode subject
+            subj = ""
+            if msg["Subject"]:
+                parts = decode_header(msg["Subject"])
+                subj = "".join(
+                    p.decode(enc or "utf-8") if isinstance(p, bytes) else p
+                    for p, enc in parts
+                )
+
+            # Get plain-text body
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode(errors="replace")
+                        break
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(errors="replace")
+
+            emails.append({
+                "from": msg.get("From", ""),
+                "to": msg.get("To", ""),
+                "subject": subj,
+                "date": msg.get("Date", ""),
+                "body": body[:2000],
+            })
+
+        mail.logout()
+        return {"ok": True, "count": len(emails), "emails": emails}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "emails": []}
