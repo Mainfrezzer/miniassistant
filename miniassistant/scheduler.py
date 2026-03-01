@@ -66,10 +66,11 @@ def _run_scheduled_job(job_id: str, job_data: str) -> None:
     _SCHEDULE_PREFIX = (
         "[SCHEDULED TASK — autonomous mode] "
         "You are executing a scheduled task. The user is NOT present and cannot respond. "
-        "Complete the task fully on your own using your tools (exec, web_search, read_url, send_email, read_email, etc.). "
-        "For emails: use the send_email/read_email tools directly — do NOT write Python scripts. "
+        "Complete the task fully on your own using your tools (exec, web_search, read_url, etc.). "
+        "ONLY use send_email/read_email if the prompt EXPLICITLY asks you to send or read an email AND specifies a recipient. "
+        "NEVER send emails on your own initiative — the result will be delivered automatically via chat. "
         "NEVER give instructions to the user, NEVER ask follow-up questions, NEVER say 'you can do X'. "
-        "Just do it, deliver the result.\n\n"
+        "Just do it, deliver the result as text response.\n\n"
     )
 
     # Prompt ausfuehren (Bot aufwecken)
@@ -79,9 +80,12 @@ def _run_scheduled_job(job_id: str, job_data: str) -> None:
             if cmd_output:
                 full_prompt = f"{full_prompt}\n\nAusgabe des Befehls:\n{cmd_output}"
             logger.info("Job %s prompt (model=%s): %s", job_id[:8], model or "default", prompt[:80])
-            response = _run_prompt(full_prompt, model=model)
+            response = _run_prompt(full_prompt, model=model, scheduled_prompt=prompt)
             logger.info("Job %s antwort: %d Zeichen", job_id[:8], len(response))
-            _send_to_client(response, client, room_id=room_id, channel_id=channel_id)
+            if response.strip() == "[WATCH:PENDING]":
+                logger.info("Job %s watch pending — keine Benachrichtigung", job_id[:8])
+            else:
+                _send_to_client(response, client, room_id=room_id, channel_id=channel_id)
             logger.info("Job %s -> %s gesendet", job_id[:8], client or "alle")
         except Exception as e:
             logger.exception("Job %s prompt fehlgeschlagen", job_id[:8])
@@ -95,7 +99,7 @@ def _run_scheduled_job(job_id: str, job_data: str) -> None:
 
 
 def _remove_job_by_id(job_id: str) -> None:
-    """Entfernt einen Job aus schedules.json und dem Scheduler."""
+    """Entfernt einen Job aus schedules.json und dem Scheduler. Räumt Watch-State-Dateien auf."""
     jobs = _load_jobs()
     remaining = [j for j in jobs if j.get("id") != job_id]
     if len(remaining) < len(jobs):
@@ -107,14 +111,25 @@ def _remove_job_by_id(job_id: str) -> None:
             sched.remove_job(job_id)
         except Exception:
             pass
+    # Watch-State-Datei aufräumen (file_size_stable)
+    try:
+        state_file = Path(get_config_dir()) / "watch_state" / f"{job_id}.json"
+        if state_file.exists():
+            state_file.unlink()
+            logger.info("Watch-State %s entfernt", job_id[:8])
+    except Exception:
+        pass
 
 
-def _run_prompt(prompt: str, model: str | None = None) -> str:
+def _run_prompt(prompt: str, model: str | None = None, scheduled_prompt: str | None = None) -> str:
     """Fuehrt einen Prompt durch den Bot (eigene Session) und gibt die Antwort zurueck.
-    model: optionaler Modellname/Alias. Wird aufgeloest; bei Fehler Fallback auf Default."""
+    model: optionaler Modellname/Alias. Wird aufgeloest; bei Fehler Fallback auf Default.
+    scheduled_prompt: Original-Prompt (ohne Prefix) — wird als Guardrail-Kontext fuer Tools gesetzt."""
     config = load_config()
     from miniassistant.chat_loop import create_session, handle_user_input
     from miniassistant.ollama_client import resolve_model
+    if scheduled_prompt is not None:
+        config["_scheduled_task_prompt"] = scheduled_prompt
     session = create_session(config, None)
     if model:
         resolved = resolve_model(config, model)
@@ -204,6 +219,12 @@ def add_scheduled_job(
     model: str | None = None,
     room_id: str | None = None,
     channel_id: str | None = None,
+    watch: bool = False,
+    job_id: str | None = None,
+    watch_check: str = "",
+    watch_message: str = "",
+    watch_timeout: str = "",
+    watch_recurring: bool = False,
 ) -> tuple[bool, str]:
     """
     Fuegt einen geplanten Job hinzu.
@@ -230,7 +251,7 @@ def add_scheduled_job(
     if not sched:
         return False, "Scheduler nicht verfuegbar (pip install apscheduler)."
 
-    job_id = str(uuid.uuid4())
+    job_id = job_id or str(uuid.uuid4())
     job_data_dict: dict[str, Any] = {}
     if command:
         job_data_dict["command"] = command
@@ -260,6 +281,16 @@ def add_scheduled_job(
         "model": model,
         "added_at": datetime.now().astimezone().isoformat(),
     }
+    if watch:
+        job_entry["watch"] = True
+        if watch_check:
+            job_entry["watch_check"] = watch_check
+        if watch_message:
+            job_entry["watch_message"] = watch_message
+        if watch_timeout:
+            job_entry["watch_timeout"] = watch_timeout
+        if watch_recurring:
+            job_entry["watch_recurring"] = True
     if room_id:
         job_entry["room_id"] = room_id
     if channel_id:

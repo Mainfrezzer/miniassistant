@@ -544,6 +544,19 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             if sender == user_id:
                 logger.debug("Matrix: eigene Nachricht übersprungen")
             return
+        # Gruppenräume (>2 Mitglieder): nur bei @mention antworten
+        room_obj = (getattr(client, "rooms", {}) or {}).get(room_id)
+        room_members = getattr(room_obj, "users", {}) or {} if room_obj else {}
+        if len(room_members) > 2:
+            source = getattr(event, "source", None) or {}
+            src_content = source.get("content") or {} if isinstance(source, dict) else {}
+            mentions = (src_content.get("m.mentions") or {}) if isinstance(src_content, dict) else {}
+            mentioned_ids = (mentions.get("user_ids") or []) if isinstance(mentions, dict) else []
+            is_mentioned = user_id in mentioned_ids or user_id.lower() in body.lower()
+            if not is_mentioned:
+                logger.debug("Matrix: Gruppenraum %s – kein @mention, ignoriert (Mitglieder: %d)", room_id, len(room_members))
+                return
+
         # /stop und /abort: Cancellation-Befehle abfangen
         if body.lower() in ("/stop", "/abort"):
             from miniassistant.cancellation import request_cancel

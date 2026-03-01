@@ -283,7 +283,7 @@ async def index(request: Request):
     token_esc = _escape(effective_token) if effective_token else ""
     config_links = ""
     if has_token:
-        config_links = '<li><a href="/config' + tq + '">Konfiguration</a></li><li><a href="/schedules' + tq + '">Geplante Jobs</a></li><li><a href="/logs' + tq + '">Logs</a></li><li><a href="/api/config' + tq + '">API: Config (JSON)</a></li>'
+        config_links = '<li><a href="/config' + tq + '">Konfiguration</a></li><li><a href="/nutzung' + tq + '">Nutzung</a></li><li><a href="/schedules' + tq + '">Geplante Jobs</a></li><li><a href="/logs' + tq + '">Logs</a></li><li><a href="/api/config' + tq + '">API: Config (JSON)</a></li>'
     logout_btn = '<button type="button" class="btn btn-outline" id="logout-btn" style="margin-left:0.5em;">Logout</button>' if is_authed else ""
     html = f"""
     <!DOCTYPE html>
@@ -490,20 +490,34 @@ async def schedules_page(request: Request):
                 when = str(args)
             # Aufgabe zusammenbauen
             task_parts = []
-            if j.get("prompt"):
-                full_prompt = _escape(j["prompt"])
-                if len(j["prompt"]) > 80:
-                    short = _escape(j["prompt"][:80])
-                    task_parts.append(f'<details><summary>{short}…</summary><div class="prompt-full">{full_prompt}</div></details>')
-                else:
-                    task_parts.append(full_prompt)
-            if j.get("command"):
-                full_cmd = _escape(j["command"])
-                if len(j["command"]) > 60:
-                    short_cmd = _escape(j["command"][:60])
-                    task_parts.append(f'<details><summary><code>{short_cmd}…</code></summary><div class="prompt-full"><code>{full_cmd}</code></div></details>')
-                else:
-                    task_parts.append(f'<code>{full_cmd}</code>')
+            if j.get("watch"):
+                # Watch-Jobs: sauber aus Metadaten anzeigen statt internem LLM-Prompt
+                wcheck = _escape(j.get("watch_check") or "?")
+                wmsg = _escape(j.get("watch_message") or "")
+                wtimeout = _escape(j.get("watch_timeout") or "")
+                wrecur = " · recurring" if j.get("watch_recurring") else ""
+                task_parts.append(
+                    f'<span style="font-size:0.85em;color:var(--muted);">Bedingung:</span> <code>{wcheck}</code>'
+                )
+                if wmsg:
+                    task_parts.append(f'<span style="font-size:0.85em;color:var(--muted);">Nachricht:</span> {wmsg}')
+                if wtimeout:
+                    task_parts.append(f'<span style="font-size:0.85em;color:var(--muted);">Timeout:{wrecur}</span> {wtimeout}')
+            else:
+                if j.get("prompt"):
+                    full_prompt = _escape(j["prompt"])
+                    if len(j["prompt"]) > 80:
+                        short = _escape(j["prompt"][:80])
+                        task_parts.append(f'<details><summary>{short}…</summary><div class="prompt-full">{full_prompt}</div></details>')
+                    else:
+                        task_parts.append(full_prompt)
+                if j.get("command"):
+                    full_cmd = _escape(j["command"])
+                    if len(j["command"]) > 60:
+                        short_cmd = _escape(j["command"][:60])
+                        task_parts.append(f'<details><summary><code>{short_cmd}…</code></summary><div class="prompt-full"><code>{full_cmd}</code></div></details>')
+                    else:
+                        task_parts.append(f'<code>{full_cmd}</code>')
             task = "<br>".join(task_parts) if task_parts else "?"
             client_str = j.get("client") or "alle"
             if j.get("room_id"):
@@ -513,9 +527,10 @@ async def schedules_page(request: Request):
             client = client_str
             model = _escape(j.get("model") or "default")
             once_tag = ' <span style="color:var(--muted);font-size:0.8em;">einmalig</span>' if j.get("once") else ""
+            watch_badge = ' <span class="badge-watch" title="Watch-Job">👁 Watch</span>' if j.get("watch") else ""
             full_id = _escape(j.get("id", ""))
             rows += (
-                f'<tr><td><code>{_escape(when)}</code>{once_tag}</td><td>{task}</td><td>{client}</td><td>{model}</td><td>{added}</td>'
+                f'<tr><td><code>{_escape(when)}</code>{once_tag}{watch_badge}</td><td>{task}</td><td>{client}</td><td>{model}</td><td>{added}</td>'
                 f'<td><code>{jid}</code> <button class="btn-del" data-id="{full_id}" title="Loeschen">&#10005;</button></td></tr>'
             )
     html = f"""
@@ -535,6 +550,8 @@ async def schedules_page(request: Request):
     .btn-del {{ background: none; border: 1.5px solid var(--danger); color: var(--danger); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; transition: background 0.15s; }}
     .btn-del:hover {{ background: var(--danger); color: #fff; }}
+    .badge-watch {{ display: inline-block; font-size: 0.75em; background: #e8f0fe; color: #1a56db;
+      border: 1px solid #a4c2f4; border-radius: 4px; padding: 0.05em 0.35em; margin-left: 0.3em; vertical-align: middle; }}
     details {{ cursor: pointer; }}
     details summary {{ display: inline; }}
     details .prompt-full {{ margin-top: 0.4em; white-space: pre-wrap; word-break: break-word; padding: 0.4em; background: var(--bg-secondary, #f5f5f5); border-radius: 4px; font-size: 0.9em; }}
@@ -1845,6 +1862,240 @@ async def api_restart(request: Request):
         return JSONResponse({"ok": True, "method": method, "message": f"Restart via {method} ausgelöst."})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Restart fehlgeschlagen: {e}")
+
+
+@app.get("/api/usage")
+async def api_usage(request: Request):
+    """GET /api/usage?period=hour|day|week|month|year|all -> aggregierte Nutzungsdaten."""
+    _require_token(request)
+    period = request.query_params.get("period", "day")
+    from miniassistant.usage import get_usage_for_period
+    data = get_usage_for_period(period)
+    return JSONResponse(data)
+
+
+@app.get("/nutzung", response_class=HTMLResponse)
+async def nutzung_page(request: Request):
+    """Nutzungsstatistiken: Zeitfilter, Chart, Aufschlüsselung nach Modell/Typ."""
+    _require_token(request)
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nutzung – MiniAssistant</title>
+    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <style>
+    {_COMMON_CSS}
+    .usage-wrap {{ max-width: 1100px; margin: 0 auto; padding: 1em; }}
+    .usage-header {{ display: flex; align-items: center; gap: 0.6em; padding-bottom: 0.5em; border-bottom: 1px solid var(--border); margin-bottom: 1em; flex-wrap: wrap; }}
+    .usage-header img {{ width: 32px; height: 32px; border-radius: 6px; }}
+    .usage-header h1 {{ margin: 0; font-size: 1.2em; }}
+    .usage-nav {{ margin-left: auto; }}
+    .filter-bar {{ display: flex; gap: 0.4em; flex-wrap: wrap; margin-bottom: 1em; }}
+    .filter-bar button {{ padding: 0.4em 0.9em; border: 1.5px solid var(--border); border-radius: var(--radius);
+                          background: var(--card); color: var(--text); cursor: pointer; font-size: 0.85em; transition: all 0.15s; }}
+    .filter-bar button:hover {{ border-color: var(--primary); }}
+    .filter-bar button.active {{ background: var(--primary); color: #fff; border-color: var(--primary); }}
+    .summary-cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.8em; margin-bottom: 1.2em; }}
+    .summary-card {{ background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 1em; text-align: center; }}
+    .summary-card .label {{ font-size: 0.8em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }}
+    .summary-card .value {{ font-size: 1.6em; font-weight: 700; color: var(--text); margin-top: 0.2em; }}
+    .chart-container {{ background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 1em; margin-bottom: 1.2em; position: relative; height: 300px; }}
+    .tables-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }}
+    @media (max-width: 700px) {{ .tables-row {{ grid-template-columns: 1fr; }} }}
+    .usage-table {{ background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius); overflow: hidden; }}
+    .usage-table h3 {{ margin: 0; padding: 0.6em 0.8em; font-size: 0.9em; border-bottom: 1px solid var(--border); background: var(--bg); }}
+    .usage-table table {{ width: 100%; border-collapse: collapse; font-size: 0.85em; }}
+    .usage-table th, .usage-table td {{ padding: 0.5em 0.8em; text-align: left; border-bottom: 1px solid var(--border); }}
+    .usage-table th {{ font-weight: 600; color: var(--muted); font-size: 0.8em; text-transform: uppercase; }}
+    .usage-table tr:last-child td {{ border-bottom: none; }}
+    .empty-hint {{ color: var(--muted); font-style: italic; text-align: center; padding: 2em; }}
+    </style>
+    </head>
+    <body>
+    <div class="usage-wrap">
+      <div class="usage-header">
+        <img src="/static/miniassistant.png" alt="Logo">
+        <h1>Nutzung</h1>
+        <div class="usage-nav">
+          <a href="/" class="btn btn-outline" style="padding:0.35em 0.8em;font-size:0.85em;">Startseite</a>
+        </div>
+      </div>
+      <div class="filter-bar">
+        <button data-period="hour">Letzte Stunde</button>
+        <button data-period="day" class="active">Heute</button>
+        <button data-period="week">7 Tage</button>
+        <button data-period="month">30 Tage</button>
+        <button data-period="year">Jahr</button>
+        <button data-period="all">Gesamt</button>
+      </div>
+      <div class="summary-cards">
+        <div class="summary-card"><div class="label">Gesamtzeit</div><div class="value" id="sum-time">—</div></div>
+        <div class="summary-card"><div class="label">Anfragen</div><div class="value" id="sum-requests">—</div></div>
+        <div class="summary-card"><div class="label">Modelle</div><div class="value" id="sum-models">—</div></div>
+      </div>
+      <div class="chart-container"><canvas id="usage-chart"></canvas></div>
+      <div class="tables-row">
+        <div class="usage-table">
+          <h3>Nach Modell</h3>
+          <div id="table-model"><div class="empty-hint">Lade…</div></div>
+        </div>
+        <div class="usage-table">
+          <h3>Nach Typ</h3>
+          <div id="table-type"><div class="empty-hint">Lade…</div></div>
+        </div>
+      </div>
+    </div>
+    <script>
+    (function() {{
+      var chart = null;
+      var ctx = document.getElementById("usage-chart").getContext("2d");
+      var btns = document.querySelectorAll(".filter-bar button");
+
+      function fmtSec(s) {{
+        if (s < 60) return s.toFixed(1) + "s";
+        var m = Math.floor(s / 60);
+        var sec = Math.round(s - m * 60);
+        if (m < 60) return m + "m " + sec + "s";
+        var h = Math.floor(m / 60);
+        m = m % 60;
+        return h + "h " + m + "m";
+      }}
+
+      function buildTable(rows, cols) {{
+        if (!rows || !rows.length) return '<div class="empty-hint">Keine Daten</div>';
+        var h = '<table><thead><tr>';
+        cols.forEach(function(c) {{ h += '<th>' + c.label + '</th>'; }});
+        h += '</tr></thead><tbody>';
+        rows.forEach(function(r) {{
+          h += '<tr>';
+          cols.forEach(function(c) {{
+            var v = r[c.key];
+            if (c.fmt === 'sec') v = fmtSec(v);
+            h += '<td>' + v + '</td>';
+          }});
+          h += '</tr>';
+        }});
+        h += '</tbody></table>';
+        return h;
+      }}
+
+      function loadData(period) {{
+        fetch("/api/usage?period=" + period, {{credentials: "same-origin"}})
+          .then(function(r) {{ return r.json(); }})
+          .then(function(data) {{
+            // Summary
+            document.getElementById("sum-time").textContent = data.summary.formatted || "0s";
+            document.getElementById("sum-requests").textContent = data.summary.total_requests;
+            document.getElementById("sum-models").textContent = (data.by_model || []).length;
+
+            // Chart
+            var labels = (data.by_time || []).map(function(d) {{
+              var l = d.label;
+              if (l.length > 10) l = l.slice(5);  // kürze "2026-" weg
+              return l;
+            }});
+            var values = (data.by_time || []).map(function(d) {{ return d.seconds; }});
+            var counts = (data.by_time || []).map(function(d) {{ return d.requests; }});
+
+            if (chart) chart.destroy();
+            var isDark = document.documentElement.getAttribute("data-theme") === "dark"
+                         || (!document.documentElement.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+            var gridColor = isDark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)";
+            var textColor = isDark ? "#aaa" : "#666";
+
+            chart = new Chart(ctx, {{
+              type: "bar",
+              data: {{
+                labels: labels,
+                datasets: [{{
+                  label: "Sekunden",
+                  data: values,
+                  backgroundColor: "rgba(59, 130, 246, 0.6)",
+                  borderColor: "rgba(59, 130, 246, 1)",
+                  borderWidth: 1,
+                  borderRadius: 4,
+                  yAxisID: "y"
+                }}, {{
+                  label: "Anfragen",
+                  data: counts,
+                  type: "line",
+                  borderColor: "rgba(249, 115, 22, 0.8)",
+                  backgroundColor: "rgba(249, 115, 22, 0.1)",
+                  borderWidth: 2,
+                  pointRadius: 3,
+                  fill: true,
+                  yAxisID: "y1"
+                }}]
+              }},
+              options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {{ mode: "index", intersect: false }},
+                plugins: {{
+                  legend: {{ labels: {{ color: textColor, font: {{ size: 12 }} }} }},
+                  tooltip: {{
+                    callbacks: {{
+                      label: function(ctx) {{
+                        if (ctx.dataset.label === "Sekunden") return "Zeit: " + fmtSec(ctx.raw);
+                        return "Anfragen: " + ctx.raw;
+                      }}
+                    }}
+                  }}
+                }},
+                scales: {{
+                  x: {{ ticks: {{ color: textColor, font: {{ size: 11 }} }}, grid: {{ color: gridColor }} }},
+                  y: {{
+                    type: "linear", position: "left",
+                    title: {{ display: true, text: "Sekunden", color: textColor }},
+                    ticks: {{ color: textColor }}, grid: {{ color: gridColor }},
+                    beginAtZero: true
+                  }},
+                  y1: {{
+                    type: "linear", position: "right",
+                    title: {{ display: true, text: "Anfragen", color: textColor }},
+                    ticks: {{ color: textColor, stepSize: 1 }}, grid: {{ drawOnChartArea: false }},
+                    beginAtZero: true
+                  }}
+                }}
+              }}
+            }});
+
+            // Tables
+            document.getElementById("table-model").innerHTML = buildTable(
+              data.by_model,
+              [{{key: "model", label: "Modell"}}, {{key: "seconds", label: "Zeit", fmt: "sec"}}, {{key: "requests", label: "Anfragen"}}]
+            );
+            document.getElementById("table-type").innerHTML = buildTable(
+              data.by_type,
+              [{{key: "type", label: "Typ"}}, {{key: "seconds", label: "Zeit", fmt: "sec"}}, {{key: "requests", label: "Anfragen"}}]
+            );
+          }})
+          .catch(function(e) {{
+            document.getElementById("sum-time").textContent = "Fehler";
+            console.error("Usage fetch error:", e);
+          }});
+      }}
+
+      btns.forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+          btns.forEach(function(b) {{ b.classList.remove("active"); }});
+          btn.classList.add("active");
+          loadData(btn.getAttribute("data-period"));
+        }});
+      }});
+
+      loadData("day");
+    }})();
+    </script>
+    {_THEME_JS}
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
 
 @app.post("/api/onboarding/save")

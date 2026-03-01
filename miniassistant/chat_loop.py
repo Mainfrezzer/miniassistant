@@ -1027,6 +1027,19 @@ def _run_tool(
             return result.get("content", "")
         return f"Error reading URL: {result.get('error', 'unknown error')}"
     if name == "send_email":
+        # Guardrail: In Scheduled Tasks nur erlauben wenn der Original-Prompt
+        # explizit E-Mail/Mail erwaehnt — verhindert unsolicited E-Mails
+        _sched_prompt = config.get("_scheduled_task_prompt")
+        if _sched_prompt is not None:
+            import re as _re
+            _email_keywords = _re.search(
+                r'\b(e-?mail|mail|send_email|schick.*mail|sende.*mail|schreib.*mail)\b',
+                _sched_prompt, _re.IGNORECASE,
+            )
+            if not _email_keywords:
+                _log.warning("send_email blocked: scheduled prompt does not mention email")
+                return ("send_email blocked: The scheduled task prompt does not explicitly request "
+                        "sending an email. Deliver your result as text response instead.")
         from miniassistant.tools import send_email as tool_send_email
         to = arguments.get("to", "").strip()
         subject = arguments.get("subject", "").strip()
@@ -1062,6 +1075,108 @@ def _run_tool(
         for e in emails:
             lines.append(f"From: {e.get('from', '')}\nTo: {e.get('to', '')}\nDate: {e.get('date', '')}\nSubject: {e.get('subject', '')}\n{e.get('body', '')}\n---")
         return "\n".join(lines)
+    if name == "watch":
+        import uuid as _uuid
+        import shlex as _shlex
+        from datetime import datetime as _dt, timedelta as _td
+        from pathlib import Path as _WPath
+        from miniassistant.config import get_config_dir as _get_cfg_dir
+        from miniassistant.scheduler import add_scheduled_job as _add_job
+
+        check = (arguments.get("check") or "").strip()
+        message = (arguments.get("message") or "").strip()
+        context = (arguments.get("context") or "").strip()
+        interval_minutes = max(1, int(arguments.get("interval_minutes") or 2))
+        timeout_hours = max(0.1, float(arguments.get("timeout_hours") or 2))
+        recurring = bool(arguments.get("recurring", False))
+
+        if not check:
+            return "watch requires 'check' (e.g. 'file_exists:/path', 'pid_done:1234', 'exec:command')"
+        if not message:
+            return "watch requires 'message' (notification text when condition is met)"
+
+        # Job-ID vorab generieren (für State-Datei bei file_size_stable)
+        job_id = str(_uuid.uuid4())
+        job_id_short = job_id[:8]
+
+        # Check-Kommando aus Typ ableiten
+        if check.startswith("file_exists:"):
+            path = check[len("file_exists:"):]
+            check_cmd = f"test -f {_shlex.quote(path)}"
+        elif check.startswith("file_size_stable:"):
+            path = check[len("file_size_stable:"):]
+            state_dir = _WPath(_get_cfg_dir()) / "watch_state"
+            state_file = str(state_dir / f"{job_id}.json")
+            check_cmd = (
+                f"python3 -c \""
+                f"import os,json,sys; "
+                f"p={repr(path)}; sf={repr(state_file)}; "
+                f"os.makedirs(os.path.dirname(sf),exist_ok=True); "
+                f"cur=os.path.getsize(p) if os.path.exists(p) else -1; "
+                f"prev=json.load(open(sf)).get('size') if os.path.exists(sf) else None; "
+                f"json.dump({{'size':cur}},open(sf,'w')); "
+                f"sys.exit(0 if cur>0 and cur==prev else 1)"
+                f"\""
+            )
+        elif check.startswith("pid_done:"):
+            pid = check[len("pid_done:"):].strip()
+            check_cmd = f"! kill -0 {pid} 2>/dev/null"
+        elif check.startswith("exec:"):
+            check_cmd = check[len("exec:"):]
+        else:
+            return f"watch: unknown check type '{check}'. Use file_exists:, file_size_stable:, pid_done:, or exec:"
+
+        # Timeout-Zeitpunkt berechnen
+        timeout_dt = _dt.now().astimezone() + _td(hours=timeout_hours)
+        timeout_dt_str = timeout_dt.strftime("%Y-%m-%d %H:%M")
+
+        # Cron aus Intervall
+        if interval_minutes >= 60:
+            h = interval_minutes // 60
+            cron_when = f"0 */{h} * * *" if h > 1 else "0 * * * *"
+        else:
+            cron_when = f"*/{interval_minutes} * * * *"
+
+        if recurring:
+            cleanup_note = "This is a RECURRING watch — do NOT remove the job after notifying."
+        else:
+            cleanup_note = f'Call schedule(action="remove", id="{job_id_short}") to delete this watch job.'
+
+        scheduled_prompt = (
+            f"[WATCH JOB — id:{job_id_short}]\n"
+            f"Context: {context or '(none)'}\n"
+            f"Timeout: {timeout_dt_str}\n\n"
+            f"Every time this runs:\n"
+            f"1. Run this check via exec: {check_cmd}\n"
+            f"2. Evaluate:\n"
+            f"   a. Exit code 0 AND time < {timeout_dt_str} → CONDITION MET:\n"
+            f"      {cleanup_note}\n"
+            f"      Return ONLY: {message}\n"
+            f"   b. Current time >= {timeout_dt_str} → TIMED OUT:\n"
+            f'      Call schedule(action="remove", id="{job_id_short}") to delete this job.\n'
+            f"      Return ONLY: ⏰ Watch abgelaufen ({timeout_hours:.0f}h). Kontext: {context or message}\n"
+            f"   c. Exit code non-zero AND not timed out → PENDING:\n"
+            f"      Do NOT call any tool. Return ONLY the exact text: [WATCH:PENDING]\n"
+        )
+
+        ok, info = _add_job(
+            cron_when,
+            prompt=scheduled_prompt,
+            once=False,
+            watch=True,
+            job_id=job_id,
+            watch_check=check,
+            watch_message=message,
+            watch_timeout=timeout_dt_str,
+            watch_recurring=recurring,
+        )
+        if not ok:
+            return f"watch: failed to create job — {info}"
+
+        interval_desc = f"alle {interval_minutes} Min." if interval_minutes < 60 else f"alle {interval_minutes // 60}h"
+        recur_desc = " (recurring)" if recurring else f", Timeout in {timeout_hours:.0f}h"
+        return f"Watch aktiv [{job_id_short}] — prüft {interval_desc}{recur_desc}: {check}"
+
     if name == "send_image":
         from pathlib import Path as _Path
         image_path = arguments.get("image_path", "").strip()
@@ -1224,10 +1339,27 @@ def _run_tool(
         if _ws:
             sub_system = sub_system.replace("{workspace}", _ws)
             sub_system += f"\n\nWorking directory (cwd for exec): `{_ws}`. All exec commands run in this directory. Save ALL generated files (images, reports, etc.) inside this workspace directory. Use relative paths when possible."
+        _t0_sub = time.monotonic()
+        _sub_usage_type = "subagent"
+        # Bildgenerierung erkennen (DALL-E, Gemini image models)
+        if provider_type == "google":
+            try:
+                from miniassistant.google_client import model_supports_image_generation as _g_img
+                if _g_img(api_model_sub):
+                    _sub_usage_type = "image"
+            except Exception:
+                pass
+        elif provider_type in ("openai", "openai-compat"):
+            try:
+                from miniassistant.openai_client import model_supports_image_generation as _o_img
+                if _o_img(api_model_sub):
+                    _sub_usage_type = "image"
+            except Exception:
+                pass
         try:
             if provider_type == "claude-code":
                 # Claude Code CLI – eigener Connector, keine Ollama-API
-                return _run_subagent_claude_code(
+                _sub_result = _run_subagent_claude_code(
                     config, api_model_sub, sub_system, sub_msg, resolved,
                 )
             elif provider_type == "anthropic":
@@ -1235,18 +1367,18 @@ def _run_tool(
                 base_url = get_base_url_for_model(config, resolved)
                 sub_api_key = get_api_key_for_model(config, resolved)
                 think = get_think_for_model(config, resolved)
-                return _run_subagent_anthropic(
+                _sub_result = _run_subagent_anthropic(
                     config, api_model_sub, sub_system, sub_msg,
                     sub_api_key, base_url, think, resolved,
                 )
             elif provider_type == "google":
                 # Google Gemini API – Subagent mit Tool-Support
-                return _run_subagent_google(
+                _sub_result = _run_subagent_google(
                     config, api_model_sub, sub_system, sub_msg, resolved,
                 )
             elif provider_type in ("openai", "deepseek", "openai-compat"):
                 # OpenAI / DeepSeek / OpenAI-kompatible API – Subagent mit Tool-Support
-                return _run_subagent_openai(
+                _sub_result = _run_subagent_openai(
                     config, api_model_sub, sub_system, sub_msg, resolved,
                 )
             else:
@@ -1261,11 +1393,22 @@ def _run_tool(
                 if not model_supports_tools(base_url, api_model_sub):
                     _log.info("Subagent %s: model does not support tools, calling without tools", resolved)
                     sub_tools = []
-                return _run_subagent_with_tools(
+                _sub_result = _run_subagent_with_tools(
                     config, base_url, api_model_sub, sub_system, sub_msg,
                     sub_tools, think, options, sub_api_key, resolved,
                 )
+            try:
+                from miniassistant.usage import record as _usage_record
+                _usage_record(config, resolved, _sub_usage_type, time.monotonic() - _t0_sub)
+            except Exception:
+                pass
+            return _sub_result
         except Exception as e:
+            try:
+                from miniassistant.usage import record as _usage_record
+                _usage_record(config, resolved, _sub_usage_type + "_error", time.monotonic() - _t0_sub)
+            except Exception:
+                pass
             err = f"invoke_model failed ({resolved}): {e}"
             _aal.log_subagent_result(config, resolved, err, "")
             return err
@@ -1346,18 +1489,19 @@ def _debate_call(
     _, api_model = get_provider_config(config, model_name)
     api_model = api_model or model_name
 
+    _t0_debate = time.monotonic()
     try:
         if provider_type == "claude-code":
-            return _run_subagent_claude_code(config, api_model, enriched_system, message, model_name)
+            _deb_result = _run_subagent_claude_code(config, api_model, enriched_system, message, model_name)
         elif provider_type == "anthropic":
             base_url = get_base_url_for_model(config, model_name)
             api_key = get_api_key_for_model(config, model_name)
             think = get_think_for_model(config, model_name)
-            return _run_subagent_anthropic(config, api_model, enriched_system, message, api_key, base_url, think, model_name)
+            _deb_result = _run_subagent_anthropic(config, api_model, enriched_system, message, api_key, base_url, think, model_name)
         elif provider_type == "google":
-            return _run_subagent_google(config, api_model, enriched_system, message, model_name)
+            _deb_result = _run_subagent_google(config, api_model, enriched_system, message, model_name)
         elif provider_type in ("openai", "deepseek", "openai-compat"):
-            return _run_subagent_openai(config, api_model, enriched_system, message, model_name)
+            _deb_result = _run_subagent_openai(config, api_model, enriched_system, message, model_name)
         else:
             # Ollama (default)
             base_url = get_base_url_for_model(config, model_name)
@@ -1369,11 +1513,22 @@ def _debate_call(
             if not model_supports_tools(base_url, api_model):
                 _log.info("Debate model %s: no tool support, calling without tools", model_name)
                 sub_tools = []
-            return _run_subagent_with_tools(
+            _deb_result = _run_subagent_with_tools(
                 config, base_url, api_model, enriched_system, message,
                 sub_tools, think, options, api_key, model_name,
             )
+        try:
+            from miniassistant.usage import record as _usage_record
+            _usage_record(config, model_name, "subagent", time.monotonic() - _t0_debate)
+        except Exception:
+            pass
+        return _deb_result
     except Exception as e:
+        try:
+            from miniassistant.usage import record as _usage_record
+            _usage_record(config, model_name, "subagent_error", time.monotonic() - _t0_debate)
+        except Exception:
+            pass
         _log.warning("Debate call failed (%s): %s", model_name, e)
         return f"(Fehler: {e})"
 
@@ -2200,25 +2355,40 @@ def chat_round(
                     _ctx_log.log_context(config, try_model, system_effective, msgs, tools=tools, num_ctx=num_ctx, think=think)
                 _api_timeout = float(config.get("api_timeout") or 600)
                 response = None
-                for attempt in range(3):
+                _t0 = time.monotonic()
+                _usage_type = "vision" if images else "chat"
+                try:
+                    for attempt in range(3):
+                        try:
+                            response = _dispatch_chat(
+                                config, try_model, msgs,
+                                system=system_effective, think=think,
+                                tools=tools, options=options or None,
+                                timeout=_api_timeout,
+                            )
+                            break
+                        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RemoteProtocolError, RuntimeError) as e:
+                            if attempt < 2:
+                                code = getattr(getattr(e, "response", None), "status_code", None)
+                                if isinstance(e, (httpx.TimeoutException, httpx.RemoteProtocolError)) or code in (400, 500, 502, 503, 504):
+                                    _log.warning("API attempt %d/3 failed (%s), retrying in 3s …", attempt + 1, e)
+                                    time.sleep(3)
+                                    continue
+                            raise
+                    if response is None:
+                        raise RuntimeError("API-Aufruf fehlgeschlagen")
+                except Exception:
                     try:
-                        response = _dispatch_chat(
-                            config, try_model, msgs,
-                            system=system_effective, think=think,
-                            tools=tools, options=options or None,
-                            timeout=_api_timeout,
-                        )
-                        break
-                    except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RemoteProtocolError, RuntimeError) as e:
-                        if attempt < 2:
-                            code = getattr(getattr(e, "response", None), "status_code", None)
-                            if isinstance(e, (httpx.TimeoutException, httpx.RemoteProtocolError)) or code in (400, 500, 502, 503, 504):
-                                _log.warning("API attempt %d/3 failed (%s), retrying in 3s …", attempt + 1, e)
-                                time.sleep(3)
-                                continue
-                        raise
-                if response is None:
-                    raise RuntimeError("API-Aufruf fehlgeschlagen")
+                        from miniassistant.usage import record as _usage_record
+                        _usage_record(config, try_model, _usage_type + "_error", time.monotonic() - _t0)
+                    except Exception:
+                        pass
+                    raise
+                try:
+                    from miniassistant.usage import record as _usage_record
+                    _usage_record(config, try_model, _usage_type, time.monotonic() - _t0)
+                except Exception:
+                    pass
                 last_response = response
                 msg = response.get("message") or {}
                 total_thinking += (msg.get("thinking") or "")
@@ -2467,6 +2637,8 @@ def chat_round_stream(
         round_thinking = ""
         round_content = ""
         round_tool_calls_raw: list[dict[str, Any]] = []
+        _t0_stream = time.monotonic()
+        _stream_usage_type = "vision" if images else "chat"
         try:
             for attempt in range(3):
                 round_thinking = ""
@@ -2504,7 +2676,17 @@ def chat_round_stream(
                             time.sleep(3)
                             continue
                     raise
+            try:
+                from miniassistant.usage import record as _usage_record
+                _usage_record(config, try_model, _stream_usage_type, time.monotonic() - _t0_stream)
+            except Exception:
+                pass
         except Exception as e:
+            try:
+                from miniassistant.usage import record as _usage_record
+                _usage_record(config, try_model, _stream_usage_type + "_error", time.monotonic() - _t0_stream)
+            except Exception:
+                pass
             yield {"type": "done", "error": str(e), "thinking": total_thinking, "content": total_content, "new_messages": msgs, "debug_info": None, "switch_info": switch_info}
             return
 

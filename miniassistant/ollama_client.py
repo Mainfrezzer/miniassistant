@@ -387,6 +387,33 @@ def _tools_schema(
                 },
             },
         })
+    if scheduler_cfg in (None, False) or scheduler_cfg is True or (isinstance(scheduler_cfg, dict) and scheduler_cfg.get("enabled", True)):
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "watch",
+                "description": (
+                    "Monitor a condition in the background and notify when it's met. "
+                    "Use this when you start a long-running background task (nohup, download, build, etc.) "
+                    "and want to notify the user when it finishes — instead of saying 'I'll notify you' and doing nothing. "
+                    "Check types: 'file_exists:/path' (file appears), 'file_size_stable:/path' (download complete — size unchanged between checks), "
+                    "'pid_done:1234' (process exits), 'exec:shell_cmd' (command returns exit 0). "
+                    "The result is sent to the user automatically when the condition is met."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "check": {"type": "string", "description": "What to monitor. Examples: 'file_size_stable:/tmp/bigfile.iso', 'pid_done:4231', 'exec:test -f /tmp/done.flag'"},
+                        "message": {"type": "string", "description": "Message to send the user when condition is met (e.g. 'Download fertig! Datei liegt in /tmp/bigfile.iso')"},
+                        "context": {"type": "string", "description": "Short summary of what was happening (e.g. 'nohup wget https://... -O /tmp/bigfile.iso started at 14:32'). Helps the watch job understand its purpose."},
+                        "interval_minutes": {"type": "integer", "description": "How often to check in minutes (default: 2). Choose based on expected duration — e.g. 1 for short tasks, 5-10 for long ones."},
+                        "timeout_hours": {"type": "number", "description": "Give up after this many hours and notify user (default: 2). Set higher for very long tasks."},
+                        "recurring": {"type": "boolean", "description": "If true, keep watching and notify every time the condition is met (default: false = one-shot, self-deletes after first trigger)."},
+                    },
+                    "required": ["check", "message"],
+                },
+            },
+        })
     schema.append({
         "type": "function",
         "function": {
