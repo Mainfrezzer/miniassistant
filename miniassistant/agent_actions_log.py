@@ -130,6 +130,14 @@ def log_debate_end(config: dict[str, Any], topic: str, rounds_completed: int, fi
     _write(path, f"[{_ts()}] DEBATE_END  topic={topic[:200]}  rounds={rounds_completed}  file={file_path}\n")
 
 
+def log_compact(config: dict[str, Any], old_count: int, summary_tokens: int, recent_count: int, budget: int) -> None:
+    """Loggt eine Chat-History-Komprimierung."""
+    path = _log_path(config)
+    if not path:
+        return
+    _write(path, f"[{_ts()}] COMPACT  {old_count} msgs → summary ({summary_tokens} tokens) + {recent_count} recent  budget={budget}\n")
+
+
 def log_subagent_start(config: dict[str, Any], model: str, message: str) -> None:
     """Loggt den Start eines Subagent-Aufrufs."""
     path = _log_path(config)

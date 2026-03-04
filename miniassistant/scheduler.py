@@ -70,7 +70,8 @@ def _run_scheduled_job(job_id: str, job_data: str) -> None:
         "ONLY use send_email/read_email if the prompt EXPLICITLY asks you to send or read an email AND specifies a recipient. "
         "NEVER send emails on your own initiative — the result will be delivered automatically via chat. "
         "NEVER give instructions to the user, NEVER ask follow-up questions, NEVER say 'you can do X'. "
-        "Just do it, deliver the result as text response.\n\n"
+        "CRITICAL: Do NOT announce what you are going to do. Do NOT write 'I will fetch...', 'Ich hole...', 'Let me...' or any similar phrase. "
+        "Call your tools IMMEDIATELY and return ONLY the final result. If the task requires tool calls, make them now.\n\n"
     )
 
     # Prompt ausfuehren (Bot aufwecken)
@@ -139,8 +140,34 @@ def _run_prompt(prompt: str, model: str | None = None, scheduled_prompt: str | N
         else:
             logger.warning("Schedule: Modell '%s' nicht auflösbar, nutze Default '%s'", model, session.get("model", ""))
     result = handle_user_input(session, prompt)
-    # result[4] = content (ohne Thinking), result[0] = response_text
-    content = (result[4] if len(result) > 4 else None) or result[0]
+    # result[4] = content (ohne Thinking), result[3] = thinking
+    # Nur echten Content verwenden — nie Thinking oder response_text (result[0]),
+    # da response_text bei leerem Content das Thinking enthält und sonst in Matrix landet.
+    content = result[4] if len(result) > 4 else None
+
+    # Strukturelle Erkennung: Hat das Modell Tools aufgerufen?
+    # Wenn nein aber Content vorhanden → wahrscheinlich Ankündigung statt Aktion.
+    msgs = session.get("messages", [])
+    tool_calls_made = any(m.get("role") == "tool" for m in msgs)
+    if not tool_calls_made and content and content.strip() not in ("[WATCH:PENDING]",):
+        logger.warning(
+            "Schedule: Modell hat KEINE Tools aufgerufen aber Text produziert (%d Zeichen) — sende Nudge",
+            len(content),
+        )
+        _NUDGE = (
+            "STOP. You described what you would do but did NOT call any tools. "
+            "Call the required tools RIGHT NOW and return only the actual result."
+        )
+        nudge_result = handle_user_input(session, _NUDGE)
+        nudge_content = nudge_result[4] if len(nudge_result) > 4 else None
+        if nudge_content and nudge_content.strip():
+            logger.info("Schedule: Nudge erfolgreich — %d Zeichen", len(nudge_content))
+            content = nudge_content
+        else:
+            logger.warning("Schedule: Nudge lieferte auch keinen Content — behalte Original")
+
+    if not content:
+        logger.warning("Schedule: Modell hat keinen Content produziert (nur Thinking oder leer)")
     return (content or "").strip()
 
 

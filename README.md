@@ -84,6 +84,7 @@ Die LLM erfährt automatisch, auf welchem System sie läuft (OS, Distribution, P
 - **Sprache:** Die Antwortsprache kommt aus **IDENTITY.md** (z.B. „Response language: Deutsch“ oder „language: English“). Beim Onboarding wird sie abgefragt und dort eingetragen – es gibt keinen Config-Eintrag `language` mehr.
 - **Merken:** Das Modell weiß, dass es mit **exec** Dateien lesen/schreiben kann. Wenn `workspace` oder `agent_dir` gesetzt sind, werden diese Pfade im System-Prompt genannt – der Assistent kann dort Notizen anlegen, wenn du ihn darum bittest.
 - **Geplante Jobs (ohne System-Cron):** Optional `scheduler.enabled: true` in der Config und `pip install miniassistant[scheduler]`. Dann steht das Tool **schedule** zur Verfügung (Cron z. B. `0 9 * * *` oder „in 30 minutes“). Jobs werden beim `serve` ausgeführt.
+- **Nutzungs-Tracking:** Optional `server.track_usage: true` – zeichnet jeden LLM-Aufruf (Modell, Typ, Dauer in Sekunden) als CSV in `$config_dir/usage/usage.csv` auf. In der Web-UI unter `/nutzung` mit Zeitfiltern (Stunde, Tag, Woche, Monat, Jahr) und Charts einsehbar.
 
 ## Konfiguration (Doku)
 
@@ -92,11 +93,3 @@ Alle Einträge sind **optional**. Fehlt etwas in der Config, werden Defaults bzw
 Ausführlich und strukturiert: **[CONFIGURATION.md](CONFIGURATION.md)** (wo die Config liegt, alle Bereiche, Optionen, Beispiele). Die Doku wird mit dem Code mitgepflegt.
 
 - **Smart Compacting:** Wenn der Chatverlauf den Kontext füllt, werden ältere Messages automatisch zusammengefasst. Steuerbar via `chat.context_quota` (Default: 0.85 = 85% von `num_ctx`). Skaliert automatisch mit der Modellgröße.
-
-## Plan
-
-Siehe [MINIASSISTANT_PLAN.md](MINIASSISTANT_PLAN.md) für Features: mehrere Modelle + Aliase, Memory bei Modellwechsel, Bootup-Assistent, SOUL selbst schreiben, Matrix optional.
-
-## Lizenz
-
-MIT

@@ -552,10 +552,16 @@ def _compact_history(
         "role": "system",
         "content": f"[Zusammenfassung des bisherigen Gesprächs]\n{summary}",
     }
+    summary_tokens = _estimate_tokens(summary)
     _log.info(
         "Chat compacted: %d messages → summary (%d tokens) + %d recent messages (budget: %d, num_ctx: %d)",
-        old_count, _estimate_tokens(summary), len(recent), budget, num_ctx,
+        old_count, summary_tokens, len(recent), budget, num_ctx,
     )
+    # Auch in uvicorn.error (sichtbar in Konsole neben "Estimated tokens") und Agent-Log
+    import logging as _logging
+    _uv = _logging.getLogger("uvicorn.error")
+    _uv.info("Chat compacted: %d msgs → summary (%d tokens) + %d recent (budget: %d)", old_count, summary_tokens, len(recent), budget)
+    _aal.log_compact(config, old_count, summary_tokens, len(recent), budget)
     return [summary_msg] + recent
 
 
@@ -2333,6 +2339,7 @@ def chat_round(
         total_thinking = ""
         total_content = ""
         _sent_image = False
+        _response_logged = False
         rounds = 0
         think = get_think_for_model(config, try_model)
         try:
@@ -2398,7 +2405,9 @@ def chat_round(
                 if not tool_calls:
                     msgs.append({"role": "assistant", "content": msg.get("content") or "", "thinking": msg.get("thinking") or ""})
                     _aal.log_thinking(config, msg.get("thinking") or "")
-                    _aal.log_response(config, msg.get("content") or "")
+                    if msg.get("content"):
+                        _aal.log_response(config, msg["content"])
+                        _response_logged = True
                     break
 
                 msgs.append({
@@ -2482,9 +2491,9 @@ def chat_round(
                 except Exception as nudge_err:
                     _log.warning("Nudge call failed: %s", nudge_err)
 
-            # Response loggen wenn es noch nicht innerhalb der Schleife geloggt wurde
-            # (passiert wenn max_rounds erreicht oder Nudge die Antwort liefert)
-            if total_content.strip() and rounds > 0:
+            # Response loggen — nur wenn noch nicht innerhalb der Schleife geloggt
+            # (Wrapup, Nudge, oder Cancellation-Fälle)
+            if not _response_logged and total_content.strip():
                 _aal.log_response(config, total_content.strip())
 
             # send_image war erfolgreich → Content unterdrücken (Bild IST die Antwort, kein Text nötig)

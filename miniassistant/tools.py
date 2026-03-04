@@ -353,11 +353,7 @@ def read_url(url: str, max_chars: int = 8000, timeout: float = 15.0, config: dic
                 text = text[:max_chars] + "\n\n[... truncated ...]"
             return {"ok": True, "content": text}
         except (httpx.TimeoutException, httpx.RemoteProtocolError) as e:
-            last_err = e
-            if attempt < _RETRY_ATTEMPTS - 1:
-                _log.warning("read_url attempt %d/%d failed (%s), retrying in %ds …", attempt + 1, _RETRY_ATTEMPTS, e, _RETRY_DELAY)
-                time.sleep(_RETRY_DELAY)
-                continue
+            # Kein Retry bei Timeouts — wenn die Seite nicht antwortet, hilft warten nicht
             return {"ok": False, "content": "", "error": str(e)}
         except httpx.HTTPStatusError as e:
             last_err = e
