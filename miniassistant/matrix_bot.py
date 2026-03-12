@@ -619,6 +619,34 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
         if not mxc_url:
             await _send_room_message(client, room_id, "Konnte Audio-URL nicht lesen.")
             return
+        # Typing-Indikator sofort starten (läuft durch Download + STT + LLM + TTS)
+        room_typing = getattr(client, "room_typing", None)
+        typing_task: asyncio.Task | None = None
+        if callable(room_typing):
+            async def _keep_typing_audio(_rid: str = room_id) -> None:
+                try:
+                    while True:
+                        await room_typing(_rid, True)
+                        await asyncio.sleep(15)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            typing_task = asyncio.create_task(_keep_typing_audio())
+
+        async def _stop_typing() -> None:
+            if typing_task is not None:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+            if callable(room_typing):
+                try:
+                    await room_typing(room_id, False)
+                except Exception:
+                    pass
+
         # Audio herunterladen
         try:
             resp = await client.download(mxc_url)
@@ -634,6 +662,7 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                     logger.warning("Matrix Audio: Entschlüsselung fehlgeschlagen: %s", e)
         except Exception as e:
             logger.exception("Matrix Audio: Download fehlgeschlagen")
+            await _stop_typing()
             await _send_room_message(client, room_id, f"Audio-Download fehlgeschlagen: {e}")
             return
         # STT
@@ -643,26 +672,20 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             transcript = _wyoming.transcribe(audio_bytes, stt_url, language=lang)
         except Exception as e:
             logger.exception("Matrix Audio: STT fehlgeschlagen")
+            await _stop_typing()
             await _send_room_message(client, room_id, f"Spracherkennung fehlgeschlagen: {e}")
             return
         if not transcript:
+            await _stop_typing()
             await _send_room_message(client, room_id, "Konnte Sprachnachricht nicht erkennen.")
             return
         logger.info("Matrix Audio: Transkript von %s: %s", sender, transcript[:80])
-        # Typing-Indikator
-        try:
-            await client.room_typing(room_id, True)
-        except Exception:
-            pass
         # Agent aufrufen (mit [Voice]-Prefix)
         response = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: _get_chat_response(config, sender, f"[Voice] {transcript}", matrix_sessions, room_id=room_id),
         )
-        try:
-            await client.room_typing(room_id, False)
-        except Exception:
-            pass
+        await _stop_typing()
         if not response:
             return
         # Voice formatieren: visuellen Inhalt herausfiltern
@@ -685,6 +708,8 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                         "body": "Sprachantwort",
                         "info": {"mimetype": "audio/wav", "size": len(wav_bytes)},
                     })
+                    from miniassistant import agent_actions_log as _aal
+                    _aal.log_voice_sent(config, chars=len(voice_text), voice=tts_voice or "", bytes_sent=len(wav_bytes))
                 else:
                     await _send_room_message(client, room_id, voice_text)
             except Exception as e:
@@ -697,36 +722,33 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             await _send_room_message(client, room_id, visual_content)
 
     async def on_message(room_id: str, event: Any) -> None:
+        # msgtype früh auslesen — wird für Bild- und Audio-Erkennung benötigt
+        _src_content: dict = {}
+        _ev_source = getattr(event, "source", None) or {}
+        if isinstance(_ev_source, dict):
+            _src_content = _ev_source.get("content") or {}
+        _msgtype: str = _src_content.get("msgtype") or ""
+
+        # Audio-Events: RoomMessageAudio, msgtype=m.audio — VOR Bild-Fallback prüfen
+        _is_audio = (RoomMessageAudio and isinstance(event, RoomMessageAudio)) or _msgtype == "m.audio"
+        if _is_audio:
+            logger.info("Matrix: Audio-Event erkannt, delegiere an on_audio")
+            await on_audio(room_id, event)
+            return
+
         # Bild-Events abfangen: RoomMessageImage, msgtype=m.image, oder body+url Heuristik
-        _is_image = (RoomMessageImage and isinstance(event, RoomMessageImage))
-        if not _is_image:
-            source = getattr(event, "source", None) or {}
-            src_content = source.get("content") or {} if isinstance(source, dict) else {}
-            if isinstance(src_content, dict) and src_content.get("msgtype") == "m.image":
-                _is_image = True
+        _is_image = (RoomMessageImage and isinstance(event, RoomMessageImage)) or _msgtype == "m.image"
         if not _is_image:
             # Fallback: event.url oder event.source.content.file vorhanden → wahrscheinlich ein Bild
-            if getattr(event, "url", None):
-                _is_image = True
-            else:
-                source = getattr(event, "source", None) or {}
-                sc = source.get("content") or {} if isinstance(source, dict) else {}
-                if isinstance(sc, dict) and sc.get("file"):
+            # Nur wenn kein anderer msgtype bekannt (verhindert false-positives bei m.audio etc.)
+            if not _msgtype:
+                if getattr(event, "url", None):
+                    _is_image = True
+                elif isinstance(_src_content, dict) and _src_content.get("file"):
                     _is_image = True
         if _is_image:
             logger.info("Matrix: Bild-Event in on_message erkannt (%s), delegiere an on_image", type(event).__name__)
             await on_image(room_id, event)
-            return
-        # Audio-Events: msgtype=m.audio oder RoomMessageAudio
-        _is_audio = (RoomMessageAudio and isinstance(event, RoomMessageAudio))
-        if not _is_audio:
-            _src = getattr(event, "source", None) or {}
-            _sc = _src.get("content") or {} if isinstance(_src, dict) else {}
-            if isinstance(_sc, dict) and _sc.get("msgtype") == "m.audio":
-                _is_audio = True
-        if _is_audio:
-            logger.info("Matrix: Audio-Event erkannt, delegiere an on_audio")
-            await on_audio(room_id, event)
             return
         if not _has_body(event):
             logger.debug("Matrix: Ereignis ignoriert (kein Text/Notice): %s", type(event).__name__)

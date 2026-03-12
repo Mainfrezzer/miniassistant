@@ -241,6 +241,8 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
                     wav_bytes = _wyoming.synthesize(voice_text, tts_url, voice=tts_voice)
                     import io as _io
                     await message.reply(file=discord.File(_io.BytesIO(wav_bytes), filename="response.wav"))
+                    from miniassistant import agent_actions_log as _aal
+                    _aal.log_voice_sent(config, chars=len(voice_text), voice=tts_voice or "", bytes_sent=len(wav_bytes))
                 except Exception as e:
                     logger.exception("Discord Audio: TTS fehlgeschlagen")
                     await message.reply(voice_text[:2000])
