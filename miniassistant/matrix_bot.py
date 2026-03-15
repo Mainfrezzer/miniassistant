@@ -685,8 +685,8 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             None,
             lambda: _get_chat_response(config, sender, f"[Voice] {transcript}", matrix_sessions, room_id=room_id),
         )
-        await _stop_typing()
         if not response:
+            await _stop_typing()
             return
         # Voice formatieren: visuellen Inhalt herausfiltern
         from miniassistant.voice_format import format_for_voice
@@ -702,6 +702,7 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                 upload_resp = await client.upload(_io.BytesIO(wav_bytes), content_type="audio/wav", filename="response.wav", filesize=len(wav_bytes))
                 mxc_audio = getattr(upload_resp, "content_uri", None) or (upload_resp[0].content_uri if isinstance(upload_resp, tuple) else None)
                 if mxc_audio:
+                    await _stop_typing()
                     await client.room_send(room_id, "m.room.message", {
                         "msgtype": "m.audio",
                         "url": mxc_audio,
@@ -711,11 +712,14 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                     from miniassistant import agent_actions_log as _aal
                     _aal.log_voice_sent(config, chars=len(voice_text), voice=tts_voice or "", bytes_sent=len(wav_bytes))
                 else:
+                    await _stop_typing()
                     await _send_room_message(client, room_id, voice_text)
             except Exception as e:
                 logger.exception("Matrix Audio: TTS/Upload fehlgeschlagen")
+                await _stop_typing()
                 await _send_room_message(client, room_id, voice_text)
         else:
+            await _stop_typing()
             await _send_room_message(client, room_id, voice_text)
         # Visuellen Inhalt (Tabellen, Code) als Text senden
         if visual_content:

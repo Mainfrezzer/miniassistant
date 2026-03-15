@@ -7,8 +7,10 @@ Minimalistisches Web-UI und API für MiniAssistant.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
+import shutil
 import uuid
 from pathlib import Path
 
@@ -138,7 +140,7 @@ def _require_token(request: Request) -> str:
     raise HTTPException(status_code=401, detail="Invalid or missing token")
 
 
-_TOKEN_COOKIE_PAGES = {"/", "/chat", "/config", "/schedules", "/onboarding", "/logs"}
+_TOKEN_COOKIE_PAGES = {"/", "/chat", "/chats", "/config", "/schedules", "/onboarding", "/logs", "/nutzung", "/workspace"}
 
 
 @app.middleware("http")
@@ -283,13 +285,13 @@ async def index(request: Request):
     token_esc = _escape(effective_token) if effective_token else ""
     config_links = ""
     if has_token:
-        config_links = '<li><a href="/config' + tq + '">Konfiguration</a></li><li><a href="/nutzung' + tq + '">Nutzung</a></li><li><a href="/schedules' + tq + '">Geplante Jobs</a></li><li><a href="/logs' + tq + '">Logs</a></li><li><a href="/api/config' + tq + '">API: Config (JSON)</a></li>'
+        config_links = '<li><a href="/config' + tq + '">Konfiguration</a></li><li><a href="/nutzung' + tq + '">Nutzung</a></li><li><a href="/schedules' + tq + '">Geplante Jobs</a></li><li><a href="/logs' + tq + '">Logs</a></li><li><a href="/workspace' + tq + '">Workspace Explorer</a></li><li><a href="/api/config' + tq + '">API: Config (JSON)</a></li>'
     logout_btn = '<button type="button" class="btn btn-outline" id="logout-btn" style="margin-left:0.5em;">Logout</button>' if is_authed else ""
     html = f"""
     <!DOCTYPE html>
     <html>
     <head><meta charset="utf-8"><title>MiniAssistant</title>
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <style>{_COMMON_CSS}</style>
     </head>
     <body>
@@ -315,6 +317,8 @@ async def index(request: Request):
     <div class="card">
       <ul class="nav-links">
         <li><a href="/chat{tq}">Chat</a></li>
+        {"<li><a href=\"/chat" + tq + ("&" if tq else "?") + "track=1\">Chat mit Verlauf</a></li>" if has_token else ""}
+        {"<li><a href=\"/chats" + tq + "\">Gespeicherte Chats</a></li>" if has_token else ""}
         {"<li><a href=\"/onboarding" + tq + "\"><strong>Onboarding / Setup</strong> (noch ausstehend)</a></li>" if show_onboarding else ""}
         {config_links}
       </ul>
@@ -385,7 +389,7 @@ async def config_page(request: Request):
     <html>
     <head><meta charset="utf-8"><title>Konfiguration – MiniAssistant</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <style>
     {_COMMON_CSS}
     .config-wrap {{ max-width: 900px; margin: 0 auto; padding: 1.2em 1em; }}
@@ -544,7 +548,7 @@ async def schedules_page(request: Request):
     html = f"""
     <!DOCTYPE html><html><head><meta charset="utf-8"><title>Schedules – MiniAssistant</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <style>
     {_COMMON_CSS}
     .sched-wrap {{ max-width: 900px; margin: 0 auto; padding: 1.2em 1em; }}
@@ -714,7 +718,7 @@ async def chat_page(request: Request):
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Chat – MiniAssistant</title>
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <script src="/static/marked.umd.js"></script>
     <style>
     {_COMMON_CSS}
@@ -724,15 +728,18 @@ async def chat_page(request: Request):
     .chat-header h1 {{ margin: 0; font-size: 1.2em; }}
     .chat-header .cmds {{ font-size: 0.75em; color: var(--muted); margin-left: auto; max-width: 50%; text-align: right; }}
     #log {{ flex: 1; overflow-y: auto; padding: 0.3em 0; }}
-    .msg {{ padding: 0.7em 0; }}
-    .msg + .msg {{ border-top: 1px solid #eee; }}
-    .msg-role {{ font-weight: 600; font-size: 0.85em; color: var(--muted); margin-bottom: 0.25em; }}
-    .msg-role.user {{ color: var(--primary); }}
+    .msg {{ padding: 0.5em 0; }}
+    .msg + .msg {{ margin-top: 0.1em; }}
+    .msg-sep {{ border: none; border-top: 1px solid var(--border); margin: 0.5em 0; }}
+    .msg-role {{ font-weight: 700; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.25em; }}
+    .msg-role.user {{ color: var(--primary); text-align: right; }}
     .msg-role.assistant {{ color: var(--success); }}
-    .msg .content {{ line-height: 1.55; }}
+    .msg.msg-user {{ text-align: right; padding-left: 3em; border-right: 3px solid var(--primary); padding-right: 0.7em; }}
+    .msg.msg-assistant {{ padding-right: 0; border-left: 3px solid var(--success); padding-left: 0.7em; }}
+    .msg .content {{ line-height: 1.6; }}
     .msg .content.markdown p {{ margin: 0.3em 0; }}
-    .msg .content.markdown pre {{ background: #f0f2f5; padding: 0.6em; border-radius: 6px; overflow-x: auto; font-size: 0.9em; }}
-    .msg .content.markdown code {{ background: #f0f2f5; padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em; }}
+    .msg .content.markdown pre {{ background: var(--bg); padding: 0.6em; border-radius: 6px; overflow-x: auto; font-size: 0.9em; }}
+    .msg .content.markdown code {{ background: var(--bg); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em; }}
     .msg .content.markdown pre code {{ background: none; padding: 0; }}
     details.thinking {{ margin-top: 0.3em; font-size: 0.88em; color: var(--muted); }}
     details.thinking summary {{ cursor: pointer; font-weight: 500; }}
@@ -759,6 +766,7 @@ async def chat_page(request: Request):
     <div class="chat-header">
       <img src="/static/miniassistant.png" alt="MiniAssistant">
       <h1>Chat</h1>
+      <span id="track-badge" style="display:none;font-size:0.72em;background:var(--primary);color:#fff;padding:0.15em 0.5em;border-radius:10px;margin-left:0.2em">💾 wird gespeichert</span>
       <span class="cmds">/model, /models, /new, /schedules, /schedule remove &lt;ID&gt;, /auth</span>
     </div>
     {"<div class=\"onboarding-notice\">Setup noch nicht abgeschlossen. <a href=\"/onboarding" + token_q + "\">Onboarding / Setup</a></div>" if show_onboarding else ""}
@@ -768,7 +776,7 @@ async def chat_page(request: Request):
       <button type="submit" class="btn btn-primary" id="btn-send">Senden</button>
       <button type="button" class="btn btn-outline" id="btn-cancel" style="display:none;">Abbrechen</button>
     </form>
-    <div class="chat-footer"><span style="opacity:0.7;">Konversationen werden nicht gespeichert (Seite neu laden = neuer Chat).</span> {onboarding_link}<a href="/{token_q}" class="btn btn-outline" style="padding:0.3em 0.7em;font-size:0.85em;">Startseite</a></div>
+    <div class="chat-footer"><span id="no-save-hint" style="opacity:0.7;">Konversationen werden nicht gespeichert (Seite neu laden = neuer Chat).</span> {onboarding_link}<a href="/{token_q}" class="btn btn-outline" style="padding:0.3em 0.7em;font-size:0.85em;">Startseite</a></div>
     </div>
     <script>
     const params = new URLSearchParams(window.location.search);
@@ -800,6 +808,43 @@ async def chat_page(request: Request):
       log.appendChild(notice);
       if (history.replaceState) history.replaceState({{}}, "", "/chat" + (token ? "?token=" + encodeURIComponent(token) : ""));
     }}
+    if (params.get("track") === "1" || params.get("resume_session")) {{
+      document.getElementById("track-badge").style.display = "";
+      document.getElementById("no-save-hint").style.display = "none";
+    }}
+    if (params.get("resume_session")) {{
+      sessionId = params.get("resume_session");
+      sessionStorage.setItem("miniassistant_session", sessionId);
+      const resumeStem = params.get("resume_stem");
+      if (resumeStem) {{
+        const histUrl = "/api/chats/file?stem=" + encodeURIComponent(resumeStem) + (token ? "&token=" + encodeURIComponent(token) : "");
+        fetch(histUrl).then(function(r) {{ return r.json(); }}).then(function(d) {{
+          const exchanges = d.exchanges || [];
+          if (exchanges.length) {{
+            const wrap = document.createElement("div");
+            wrap.style.cssText = "opacity:0.6;border-bottom:2px dashed var(--border);padding-bottom:0.8rem;margin-bottom:0.8rem;font-size:0.9em";
+            const lbl = document.createElement("div");
+            lbl.style.cssText = "font-size:0.75rem;color:var(--muted);margin-bottom:0.4rem";
+            lbl.textContent = "Vorheriger Verlauf";
+            wrap.appendChild(lbl);
+            exchanges.forEach(function(ex) {{
+              const uDiv = document.createElement("div");
+              uDiv.innerHTML = "<b>Du:</b> " + (ex.user || "").replace(/</g,"&lt;");
+              uDiv.style.marginBottom = "0.3rem";
+              wrap.appendChild(uDiv);
+              const aDiv = document.createElement("div");
+              aDiv.className = "markdown";
+              aDiv.innerHTML = typeof marked !== "undefined" ? marked.parse(ex.assistant || "") : (ex.assistant || "");
+              aDiv.style.marginBottom = "0.6rem";
+              wrap.appendChild(aDiv);
+            }});
+            log.appendChild(wrap);
+            log.scrollTop = log.scrollHeight;
+          }}
+        }}).catch(function() {{}});
+      }}
+      if (history.replaceState) history.replaceState({{}}, "", "/chat" + (token ? "?token=" + encodeURIComponent(token) : ""));
+    }}
 
     function escapeHtml(s) {{
       const div = document.createElement("div");
@@ -807,8 +852,11 @@ async def chat_page(request: Request):
       return div.innerHTML;
     }}
     function addLog(role, text, isMarkdown) {{
+      if (role === "Du" && log.children.length > 0) {{
+        const sep = document.createElement("hr"); sep.className = "msg-sep"; log.appendChild(sep);
+      }}
       const p = document.createElement("div");
-      p.className = "msg";
+      p.className = "msg " + (role === "Du" ? "msg-user" : "msg-assistant");
       const roleDiv = document.createElement("div");
       roleDiv.className = "msg-role " + (role === "Du" ? "user" : "");
       roleDiv.textContent = role;
@@ -825,7 +873,7 @@ async def chat_page(request: Request):
     }}
     function addAssistantLog(fullText, userRequest, thinkingText, contentText) {{
       const p = document.createElement("div");
-      p.className = "msg";
+      p.className = "msg msg-assistant";
       const roleDiv = document.createElement("div");
       roleDiv.className = "msg-role assistant";
       roleDiv.textContent = "Assistant";
@@ -860,7 +908,7 @@ async def chat_page(request: Request):
 
     function showStreamContainer(userRequest) {{
       const p = document.createElement("div");
-      p.className = "msg";
+      p.className = "msg msg-assistant";
       p.id = "stream-container";
       const roleDiv = document.createElement("div");
       roleDiv.className = "msg-role assistant";
@@ -948,6 +996,7 @@ async def chat_page(request: Request):
       const url = "/api/chat/stream" + (token ? "?token=" + encodeURIComponent(token) : "");
       const body = {{ message: content }};
       if (sessionId) body.session_id = sessionId;
+      if (params.get("track") === "1") body.track = true;
       try {{
         const r = await fetch(url, {{ method: "POST", headers: {{ "Content-Type": "application/json" }}, body: JSON.stringify(body), signal: currentAbort.signal }});
         if (!r.ok) {{ finishStreamContainer({{}}); addLog("Fehler", r.status + " " + (await r.text()), false); return; }}
@@ -1213,6 +1262,70 @@ async def api_notify(request: Request):
     return JSONResponse(results)
 
 
+def _get_chats_dir(config: dict) -> Path:
+    if config.get("chats_dir"):
+        return Path(config["chats_dir"]).expanduser()
+    return config_path().parent / "chats"
+
+
+def _generate_title_bg(session: dict, user_msg: str) -> None:
+    """Hintergrundthread: generiert per LLM einen kurzen Titel und schreibt ihn ins JSON."""
+    import threading, json as _json
+    def _do():
+        try:
+            from miniassistant.ollama_client import chat as _oc, get_base_url_for_model, get_api_key_for_model
+            config = session["config"]
+            model = session.get("model") or resolve_model(config, None) or ""
+            if not model or not session.get("_chat_file"):
+                return
+            base_url = get_base_url_for_model(config, model)
+            api_key = get_api_key_for_model(config, model)
+            prompt = (f"Erstelle einen kurzen Titel (max 5 Wörter, keine Anführungszeichen) "
+                      f"für dieses Gespräch.\nErste Nachricht: {user_msg[:300]}\n"
+                      f"Antworte NUR mit dem Titel, keine Erklärung.")
+            resp = _oc(base_url, [{"role": "user", "content": prompt}],
+                       model=model, api_key=api_key, timeout=20.0, num_ctx=512)
+            title = (resp.get("message", {}).get("content") or "").strip().strip('"').strip("'")[:80]
+            if title:
+                fpath = Path(session["_chat_file"])
+                if fpath.exists():
+                    data = _json.loads(fpath.read_text(encoding="utf-8"))
+                    data["title"] = title
+                    fpath.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _save_chat_to_file(session: dict, user_msg: str, assistant_msg: str) -> None:
+    """Speichert Exchange als JSON. Einzige Datei pro Chat: {stem}.json"""
+    import json as _json
+    chats_dir = _get_chats_dir(session["config"])
+    chats_dir.mkdir(parents=True, exist_ok=True)
+    is_first = "_chat_file" not in session
+    if is_first:
+        now = datetime.datetime.now()
+        stem = now.strftime("%Y-%m-%d_%H%M%S")
+        fpath = chats_dir / (stem + ".json")
+        data = {
+            "title": user_msg[:60].replace("\n", " ").strip(),
+            "model": session.get("model") or "",
+            "created": now.isoformat(),
+            "messages": [],
+            "exchanges": [],
+        }
+        session["_chat_file"] = str(fpath)
+        session["_chat_stem"] = stem
+    else:
+        fpath = Path(session["_chat_file"])
+        data = _json.loads(fpath.read_text(encoding="utf-8"))
+    data["messages"] = session.get("messages", [])
+    data["exchanges"] = data.get("exchanges", []) + [{"user": user_msg, "assistant": assistant_msg}]
+    fpath.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    if is_first:
+        _generate_title_bg(session, user_msg)
+
+
 def _chat_stream_generator(session_id: str, session: dict, message: str):
     """Sync generator: NDJSON-Zeilen mit type thinking | content | tool_call | done; fügt session_id hinzu."""
     import json as _json
@@ -1243,12 +1356,17 @@ def _chat_stream_generator(session_id: str, session: dict, message: str):
                     append_exchange(message, done_content, project_dir=session.get("project_dir"))
                 except Exception:
                     pass
+                if session.get("_track_chat"):
+                    try:
+                        _save_chat_to_file(session, message, done_content)
+                    except Exception:
+                        pass
         yield _json.dumps(out, ensure_ascii=False) + "\n"
 
 
 @app.post("/api/chat/stream")
 async def api_chat_stream(request: Request):
-    """Chat-Stream: POST { message, optional session_id } -> NDJSON (thinking/content live, am Ende done)."""
+    """Chat-Stream: POST { message, optional session_id, optional track } -> NDJSON."""
     _require_token(request)
     body = await request.json()
     message = (body.get("message") or "").strip()
@@ -1261,6 +1379,8 @@ async def api_chat_stream(request: Request):
         session_id = str(uuid.uuid4())
         project_dir = getattr(request.app.state, "project_dir", None)
         session = create_session(None, project_dir)
+        if body.get("track"):
+            session["_track_chat"] = True
         _sessions[session_id] = session
     if is_chat_command(message):
         is_new = message.strip().lower() == "/new"
@@ -1340,7 +1460,7 @@ async def onboarding_page(request: Request):
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Onboarding – MiniAssistant</title>
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <script src="/static/marked.umd.js"></script>
     <style>
     {_COMMON_CSS}
@@ -1350,15 +1470,18 @@ async def onboarding_page(request: Request):
     .chat-header h1 {{ margin: 0; font-size: 1.2em; }}
     .chat-header .subtitle {{ font-size: 0.8em; color: var(--muted); margin-left: auto; }}
     #log {{ flex: 1; overflow-y: auto; padding: 0.3em 0; }}
-    .msg {{ padding: 0.7em 0; }}
-    .msg + .msg {{ border-top: 1px solid #eee; }}
-    .msg-role {{ font-weight: 600; font-size: 0.85em; color: var(--muted); margin-bottom: 0.25em; }}
-    .msg-role.user {{ color: var(--primary); }}
+    .msg {{ padding: 0.5em 0; }}
+    .msg + .msg {{ margin-top: 0.1em; }}
+    .msg-sep {{ border: none; border-top: 1px solid var(--border); margin: 0.5em 0; }}
+    .msg-role {{ font-weight: 700; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.25em; }}
+    .msg-role.user {{ color: var(--primary); text-align: right; }}
     .msg-role.assistant {{ color: var(--success); }}
-    .msg .content {{ line-height: 1.55; }}
+    .msg.msg-user {{ text-align: right; padding-left: 3em; border-right: 3px solid var(--primary); padding-right: 0.7em; }}
+    .msg.msg-assistant {{ padding-right: 0; border-left: 3px solid var(--success); padding-left: 0.7em; }}
+    .msg .content {{ line-height: 1.6; }}
     .msg .content.markdown p {{ margin: 0.3em 0; }}
-    .msg .content.markdown pre {{ background: #f0f2f5; padding: 0.6em; border-radius: 6px; overflow-x: auto; font-size: 0.9em; }}
-    .msg .content.markdown code {{ background: #f0f2f5; padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em; }}
+    .msg .content.markdown pre {{ background: var(--bg); padding: 0.6em; border-radius: 6px; overflow-x: auto; font-size: 0.9em; }}
+    .msg .content.markdown code {{ background: var(--bg); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em; }}
     .msg .content.markdown pre code {{ background: none; padding: 0; }}
     details.thinking {{ margin-top: 0.3em; font-size: 0.88em; color: var(--muted); }}
     details.thinking summary {{ cursor: pointer; font-weight: 500; }}
@@ -1414,8 +1537,11 @@ async def onboarding_page(request: Request):
       return div.innerHTML;
     }}
     function addLog(role, text, isMd) {{
+      if (role === "Du" && log.children.length > 0) {{
+        const sep = document.createElement("hr"); sep.className = "msg-sep"; log.appendChild(sep);
+      }}
       const p = document.createElement("div");
-      p.className = "msg";
+      p.className = "msg " + (role === "Du" ? "msg-user" : "msg-assistant");
       const roleDiv = document.createElement("div");
       roleDiv.className = "msg-role " + (role === "Du" ? "user" : "");
       roleDiv.textContent = role;
@@ -1432,7 +1558,7 @@ async def onboarding_page(request: Request):
     }}
     function addAssistantWithThinking(contentText, thinkingText, userRequest) {{
       const p = document.createElement("div");
-      p.className = "msg";
+      p.className = "msg msg-assistant";
       const roleDiv = document.createElement("div");
       roleDiv.className = "msg-role assistant";
       roleDiv.textContent = "Assistant";
@@ -1457,7 +1583,7 @@ async def onboarding_page(request: Request):
     }}
     function showThinking() {{
       const p = document.createElement("div");
-      p.className = "msg";
+      p.className = "msg msg-assistant";
       p.id = "thinking-placeholder";
       const roleDiv = document.createElement("div");
       roleDiv.className = "msg-role assistant";
@@ -1772,7 +1898,7 @@ async def logs_page(request: Request):
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Logs – MiniAssistant</title>
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <style>
     {_COMMON_CSS}
     .logs-wrap {{ display: flex; flex-direction: column; height: 100vh; max-width: 1100px; margin: 0 auto; padding: 0.8em 1em; }}
@@ -2000,7 +2126,7 @@ async def nutzung_page(request: Request):
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nutzung – MiniAssistant</title>
-    <link rel="icon" type="image/png" href="/static/miniassistant.png">
+    <link rel="icon" href="/favicon.ico">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <style>
     {_COMMON_CSS}
@@ -2211,6 +2337,671 @@ async def nutzung_page(request: Request):
     </html>
     """
     return HTMLResponse(html)
+
+
+@app.get("/workspace", response_class=HTMLResponse)
+async def workspace_page(request: Request):
+    """Workspace Explorer für den Agent-Workspace."""
+    _require_token(request)
+    token = request.query_params.get("token", "") or request.cookies.get("ma_token", "")
+    tq = _token_query(token)
+    token_val = token.replace("?token=", "").replace("&token=", "")
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Workspace Explorer – MiniAssistant</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+{_COMMON_CSS}
+.container {{ max-width: 1400px !important; }}
+.ws-layout {{display:flex;gap:1rem;align-items:flex-start;height:calc(100vh - 180px)}}
+.ws-tree {{width:240px;flex-shrink:0;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow-y:auto;overflow-x:hidden;height:100%}}
+.ws-viewer {{flex:1;min-width:0;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.2rem;overflow:auto;height:100%}}
+.ws-tree ul {{list-style:none;margin:0;padding:0}}
+.ws-tree-hdr {{display:flex;background:var(--card);border:1px solid var(--border);border-bottom:none;border-radius:var(--radius) var(--radius) 0 0}}
+.ws-tab {{flex:1;padding:0.4rem 0.3rem;text-align:center;cursor:pointer;background:none;border:none;border-bottom:2px solid transparent;font-size:0.8rem;color:var(--muted)}}
+.ws-tab.active {{color:var(--primary);font-weight:600;border-bottom-color:var(--primary)}}
+.ws-tab:hover:not(.active) {{color:var(--primary)}}
+.ws-tree li {{border-bottom:1px solid var(--border)}}
+.ws-tree li:last-child {{border-bottom:none}}
+.ws-tree li.ws-frow {{display:flex;align-items:stretch}}
+.ws-frow > a {{flex:1;min-width:0}}
+.ws-tree a {{display:flex;align-items:center;gap:0.4rem;padding:0.45rem 0.8rem;color:var(--text);text-decoration:none;font-size:0.88rem;cursor:pointer}}
+.ws-tree a:hover {{background:var(--border);color:var(--primary)}}
+.ws-tree a.active {{background:var(--primary);color:#fff}}
+.ws-del-btn {{background:none;border:none;cursor:pointer;padding:0 0.6rem;color:var(--muted);font-size:0.88rem;flex-shrink:0;line-height:1}}
+.ws-del-btn:hover {{color:#e53e3e}}
+.ws-empty-trash-btn {{display:block;width:calc(100% - 1.2rem);margin:0.6rem auto;background:#e53e3e;color:#fff;border:none;border-radius:var(--radius);padding:0.45rem;cursor:pointer;font-size:0.82rem}}
+.ws-empty-trash-btn:hover {{opacity:0.85}}
+.ws-empty {{color:var(--muted);font-size:0.9rem;padding:1rem}}
+.ws-viewer img {{max-width:100%;max-height:calc(100vh - 260px);object-fit:contain;display:block;border-radius:var(--radius)}}
+.ws-viewer pre {{background:var(--bg);padding:1rem;border-radius:var(--radius);overflow:auto;font-size:0.82rem;white-space:pre-wrap;word-break:break-all}}
+.ws-viewer .md-body h1,.ws-viewer .md-body h2,.ws-viewer .md-body h3 {{margin-top:1rem}}
+.ws-viewer .md-body code {{background:var(--bg);padding:0.1em 0.3em;border-radius:3px;font-size:0.85em}}
+.ws-viewer .md-body pre {{background:var(--bg);padding:0.8rem;border-radius:var(--radius);overflow:auto}}
+.ws-viewer .md-body pre code {{background:none;padding:0}}
+.ws-viewer .md-body table {{border-collapse:collapse;width:100%}}
+.ws-viewer .md-body td,.ws-viewer .md-body th {{border:1px solid var(--border);padding:0.35rem 0.6rem}}
+.ws-viewer .md-body th {{background:var(--bg)}}
+.ws-filename {{font-weight:600;margin-bottom:0.8rem;color:var(--primary);font-size:0.95rem;word-break:break-all}}
+</style>
+<script src="/static/marked.umd.js"></script>
+</head>
+<body>
+<div class="container">
+<div class="card">
+  <div class="usage-header" style="margin-bottom:1.2rem">
+    <img src="/static/miniassistant.png" alt="Logo" style="height:2rem;width:auto">
+    <h1>Workspace Explorer</h1>
+    <div class="usage-nav">
+      <a href="/{tq}" class="btn btn-outline">Startseite</a>
+    </div>
+  </div>
+  <div class="ws-layout">
+    <div style="width:240px;flex-shrink:0;height:100%;display:flex;flex-direction:column">
+      <div class="ws-tree-hdr">
+        <button class="ws-tab active" id="ws-tab-ws" onclick="wsSwitchTab('workspace')">Workspace</button>
+        <button class="ws-tab" id="ws-tab-trash" onclick="wsSwitchTab('trash')">🗑️ Papierkorb</button>
+      </div>
+      <div class="ws-tree" id="ws-tree" style="flex:1;border-top:none;border-radius:0 0 var(--radius) var(--radius)"><div class="ws-empty">Lade...</div></div>
+    </div>
+    <div class="ws-viewer" id="ws-viewer"><div class="ws-empty">Datei auswählen</div></div>
+  </div>
+</div>
+</div>
+<script>
+var WS_TOKEN = {repr(token_val)};
+var WS_CURRENT_PATH = '';
+
+function wsApiUrl(endpoint, params) {{
+  var u = new URL('/api/workspace/' + endpoint, location.origin);
+  if (WS_TOKEN) u.searchParams.set('token', WS_TOKEN);
+  if (params) Object.keys(params).forEach(function(k) {{ u.searchParams.set(k, params[k]); }});
+  return u.toString();
+}}
+
+function wsIcon(item) {{
+  if (item.type === 'dir') return '📁';
+  var e = item.name.split('.').pop().toLowerCase();
+  if (['png','jpg','jpeg','gif','webp','bmp'].includes(e)) return '🖼️';
+  if (e === 'md') return '📝';
+  if (['py','sh','js','ts','json','yaml','yml'].includes(e)) return '💻';
+  return '📄';
+}}
+
+function wsEscape(s) {{
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+
+function wsSwitchTab(mode) {{
+  document.getElementById('ws-tab-ws').classList.toggle('active', mode === 'workspace');
+  document.getElementById('ws-tab-trash').classList.toggle('active', mode === 'trash');
+  document.getElementById('ws-viewer').innerHTML = '<div class="ws-empty">Datei auswählen</div>';
+  if (mode === 'workspace') {{ wsLoadTree(WS_CURRENT_PATH); }}
+  else {{ wsLoadTrash(); }}
+}}
+
+function wsLoadTree(path) {{
+  WS_CURRENT_PATH = path || '';
+  var tree = document.getElementById('ws-tree');
+  tree.innerHTML = '<div class="ws-empty">Lade...</div>';
+  fetch(wsApiUrl('files', {{path: WS_CURRENT_PATH}}))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ tree.innerHTML = '<div class="ws-empty">' + wsEscape(data.error) + '</div>'; return; }}
+      var html = '<ul>';
+      if (WS_CURRENT_PATH) {{
+        var parent = WS_CURRENT_PATH.includes('/') ? WS_CURRENT_PATH.split('/').slice(0,-1).join('/') : '';
+        html += '<li><a data-dir="' + wsEscape(parent) + '">⬆️ ..</a></li>';
+      }}
+      data.items.forEach(function(item) {{
+        if (item.type === 'dir') {{
+          html += '<li><a data-dir="' + wsEscape(item.path) + '" title="' + wsEscape(item.name) + '">' + wsIcon(item) + ' ' + wsEscape(item.name) + '</a></li>';
+        }} else {{
+          html += '<li class="ws-frow"><a data-file="' + wsEscape(item.path) + '" title="' + wsEscape(item.name) + '">' + wsIcon(item) + ' ' + wsEscape(item.name)
+                + '<span style="color:var(--muted);font-size:0.75rem;margin-left:auto;flex-shrink:0">' + wsEscape(item.size) + '</span></a>'
+                + '<button class="ws-del-btn" data-delete="' + wsEscape(item.path) + '" title="In Papierkorb verschieben">🗑️</button></li>';
+        }}
+      }});
+      if (!data.items.length) html += '<li><div class="ws-empty">Leer</div></li>';
+      html += '</ul>';
+      tree.innerHTML = html;
+      tree.querySelectorAll('a[data-dir]').forEach(function(a) {{
+        a.addEventListener('click', function(e) {{ e.preventDefault(); wsLoadTree(a.getAttribute('data-dir')); }});
+      }});
+      tree.querySelectorAll('a[data-file]').forEach(function(a) {{
+        a.addEventListener('click', function(e) {{ e.preventDefault(); wsLoadFile(a.getAttribute('data-file')); }});
+      }});
+      tree.querySelectorAll('button[data-delete]').forEach(function(btn) {{
+        btn.addEventListener('click', function(e) {{ e.stopPropagation(); wsDeleteFile(btn.getAttribute('data-delete')); }});
+      }});
+    }})
+    .catch(function(err) {{ tree.innerHTML = '<div class="ws-empty">Fehler: ' + wsEscape(String(err)) + '</div>'; }});
+}}
+
+function wsLoadTrash() {{
+  var tree = document.getElementById('ws-tree');
+  tree.innerHTML = '<div class="ws-empty">Lade...</div>';
+  fetch(wsApiUrl('trash/files'))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ tree.innerHTML = '<div class="ws-empty">' + wsEscape(data.error) + '</div>'; return; }}
+      var html = '<button class="ws-empty-trash-btn" id="empty-trash-btn">Papierkorb leeren</button><ul>';
+      data.items.forEach(function(item) {{
+        html += '<li><a data-trash-file="' + wsEscape(item.path) + '" title="' + wsEscape(item.name) + '">' + wsIcon(item) + ' ' + wsEscape(item.name)
+              + '<span style="color:var(--muted);font-size:0.75rem;margin-left:auto;flex-shrink:0">' + wsEscape(item.size) + '</span></a></li>';
+      }});
+      if (!data.items.length) html += '<li><div class="ws-empty">Papierkorb ist leer</div></li>';
+      html += '</ul>';
+      tree.innerHTML = html;
+      var emptyBtn = document.getElementById('empty-trash-btn');
+      if (emptyBtn) emptyBtn.addEventListener('click', wsEmptyTrash);
+      tree.querySelectorAll('a[data-trash-file]').forEach(function(a) {{
+        a.addEventListener('click', function(e) {{ e.preventDefault(); wsLoadTrashFile(a.getAttribute('data-trash-file')); }});
+      }});
+    }})
+    .catch(function(err) {{ tree.innerHTML = '<div class="ws-empty">Fehler: ' + wsEscape(String(err)) + '</div>'; }});
+}}
+
+function wsDeleteFile(path) {{
+  if (!confirm('Datei in den Papierkorb verschieben?')) return;
+  fetch(wsApiUrl('delete'), {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{path:path}})}})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ alert(data.error); return; }}
+      wsLoadTree(WS_CURRENT_PATH);
+      document.getElementById('ws-viewer').innerHTML = '<div class="ws-empty">Datei in Papierkorb verschoben</div>';
+    }})
+    .catch(function(err) {{ alert('Fehler: ' + err); }});
+}}
+
+function wsEmptyTrash() {{
+  if (!confirm('Papierkorb wirklich leeren? Alle Dateien werden endgültig gelöscht.')) return;
+  fetch(wsApiUrl('trash/empty'), {{method:'POST',headers:{{'Content-Type':'application/json'}}}})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ alert(data.error); return; }}
+      wsLoadTrash();
+      document.getElementById('ws-viewer').innerHTML = '<div class="ws-empty">Papierkorb geleert</div>';
+    }})
+    .catch(function(err) {{ alert('Fehler: ' + err); }});
+}}
+
+function wsLoadFile(path) {{
+  document.querySelectorAll('#ws-tree a').forEach(function(a) {{ a.classList.remove('active'); }});
+  document.querySelectorAll('#ws-tree a[data-file="' + path.replace(/"/g,'\\"') + '"]').forEach(function(a) {{ a.classList.add('active'); }});
+  var viewer = document.getElementById('ws-viewer');
+  viewer.innerHTML = '<div class="ws-empty">Lade...</div>';
+  fetch(wsApiUrl('file', {{path: path}}))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ viewer.innerHTML = '<div class="ws-empty">' + wsEscape(data.error) + '</div>'; return; }}
+      var name = path.split('/').pop();
+      var html = '<div class="ws-filename">' + wsEscape(name) + '</div>';
+      if (data.type === 'image') {{
+        html += '<img src="' + wsApiUrl('raw', {{path: path}}) + '" alt="' + wsEscape(name) + '">';
+      }} else if (data.type === 'markdown') {{
+        html += '<div class="md-body">' + marked.parse(data.content) + '</div>';
+      }} else {{
+        html += '<pre>' + wsEscape(data.content) + '</pre>';
+      }}
+      viewer.innerHTML = html;
+    }})
+    .catch(function(err) {{ viewer.innerHTML = '<div class="ws-empty">Fehler: ' + wsEscape(String(err)) + '</div>'; }});
+}}
+
+function wsLoadTrashFile(path) {{
+  document.querySelectorAll('#ws-tree a').forEach(function(a) {{ a.classList.remove('active'); }});
+  document.querySelectorAll('#ws-tree a[data-trash-file="' + path.replace(/"/g,'\\"') + '"]').forEach(function(a) {{ a.classList.add('active'); }});
+  var viewer = document.getElementById('ws-viewer');
+  viewer.innerHTML = '<div class="ws-empty">Lade...</div>';
+  fetch(wsApiUrl('trash/file', {{path: path}}))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ viewer.innerHTML = '<div class="ws-empty">' + wsEscape(data.error) + '</div>'; return; }}
+      var name = path.split('/').pop();
+      var html = '<div class="ws-filename">' + wsEscape(name) + '</div>';
+      if (data.type === 'image') {{
+        html += '<img src="' + wsApiUrl('trash/raw', {{path: path}}) + '" alt="' + wsEscape(name) + '">';
+      }} else if (data.type === 'markdown') {{
+        html += '<div class="md-body">' + marked.parse(data.content) + '</div>';
+      }} else {{
+        html += '<pre>' + wsEscape(data.content) + '</pre>';
+      }}
+      viewer.innerHTML = html;
+    }})
+    .catch(function(err) {{ viewer.innerHTML = '<div class="ws-empty">Fehler: ' + wsEscape(String(err)) + '</div>'; }});
+}}
+
+wsLoadTree('');
+</script>
+{_THEME_JS}
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/api/workspace/files")
+async def api_workspace_files(request: Request):
+    """Listet Dateien/Ordner im Workspace-Verzeichnis."""
+    _require_token(request)
+    config = load_config()
+    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    rel = request.query_params.get("path", "").strip().lstrip("/")
+    target = (workspace / rel).resolve()
+    if not str(target).startswith(str(workspace)):
+        raise HTTPException(status_code=403, detail="Pfad außerhalb des Workspace")
+    if not target.exists():
+        return JSONResponse({"error": "Verzeichnis nicht gefunden", "items": []})
+    if not target.is_dir():
+        return JSONResponse({"error": "Kein Verzeichnis", "items": []})
+    items = []
+    for p in sorted(target.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+        if p.name.startswith("."):
+            continue
+        rel_path = str(p.relative_to(workspace))
+        if p.is_dir():
+            items.append({"name": p.name, "type": "dir", "path": rel_path, "size": ""})
+        else:
+            size = p.stat().st_size
+            size_str = f"{size}B" if size < 1024 else (f"{size//1024}KB" if size < 1024*1024 else f"{size//1024//1024}MB")
+            items.append({"name": p.name, "type": "file", "path": rel_path, "size": size_str})
+    return JSONResponse({"items": items, "path": str(rel)})
+
+
+@app.get("/api/workspace/file")
+async def api_workspace_file(request: Request):
+    """Liefert den Inhalt einer Datei im Workspace."""
+    _require_token(request)
+    config = load_config()
+    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    rel = request.query_params.get("path", "").strip().lstrip("/")
+    target = (workspace / rel).resolve()
+    if not str(target).startswith(str(workspace)):
+        raise HTTPException(status_code=403, detail="Pfad außerhalb des Workspace")
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"error": "Datei nicht gefunden"})
+    ext = target.suffix.lower()
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return JSONResponse({"type": "image", "name": target.name})
+    if ext == ".md":
+        try:
+            return JSONResponse({"type": "markdown", "content": target.read_text(errors="replace")})
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+    text_exts = {".txt", ".log", ".json", ".yaml", ".yml", ".py", ".sh", ".js", ".ts", ".csv", ".toml", ".ini", ".cfg"}
+    if ext in text_exts or target.stat().st_size < 500_000:
+        try:
+            return JSONResponse({"type": "text", "content": target.read_text(errors="replace")[:100_000]})
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+    return JSONResponse({"error": f"Dateityp '{ext}' wird nicht unterstützt"})
+
+
+@app.get("/api/workspace/raw")
+async def api_workspace_raw(request: Request):
+    """Liefert eine Datei als Binary (für Bilder)."""
+    _require_token(request)
+    config = load_config()
+    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    rel = request.query_params.get("path", "").strip().lstrip("/")
+    target = (workspace / rel).resolve()
+    if not str(target).startswith(str(workspace)):
+        raise HTTPException(status_code=403, detail="Pfad außerhalb des Workspace")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404)
+    _mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                 ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+    media_type = _mime_map.get(target.suffix.lower())
+    return FileResponse(str(target), media_type=media_type)
+
+
+@app.post("/api/workspace/delete")
+async def api_workspace_delete(request: Request):
+    """Verschiebt eine Datei aus dem Workspace in den Papierkorb."""
+    _require_token(request)
+    body = await request.json()
+    rel = (body.get("path") or "").strip().lstrip("/")
+    if not rel:
+        return JSONResponse({"error": "Kein Pfad angegeben"})
+    config = load_config()
+    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    target = (workspace / rel).resolve()
+    if not str(target).startswith(str(workspace)):
+        raise HTTPException(status_code=403, detail="Pfad außerhalb des Workspace")
+    if not target.exists():
+        return JSONResponse({"error": "Datei nicht gefunden"})
+    if target.is_dir():
+        return JSONResponse({"error": "Verzeichnisse können nicht einzeln gelöscht werden"})
+    trash_dir = Path(config.get("trash_dir") or "~/.trash").expanduser().resolve()
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    dest = trash_dir / target.name
+    if dest.exists():
+        stem, suf = dest.stem, dest.suffix
+        i = 1
+        while dest.exists():
+            dest = trash_dir / f"{stem}_{i}{suf}"
+            i += 1
+    shutil.move(str(target), str(dest))
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/workspace/trash/files")
+async def api_workspace_trash_files(request: Request):
+    """Listet Dateien im Papierkorb."""
+    _require_token(request)
+    config = load_config()
+    trash_dir = Path(config.get("trash_dir") or "~/.trash").expanduser().resolve()
+    if not trash_dir.exists():
+        return JSONResponse({"items": [], "path": ""})
+    items = []
+    for p in sorted(trash_dir.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+        if p.name.startswith("."):
+            continue
+        if p.is_dir():
+            items.append({"name": p.name, "type": "dir", "path": p.name, "size": ""})
+        else:
+            size = p.stat().st_size
+            size_str = f"{size}B" if size < 1024 else (f"{size//1024}KB" if size < 1024*1024 else f"{size//1024//1024}MB")
+            items.append({"name": p.name, "type": "file", "path": p.name, "size": size_str})
+    return JSONResponse({"items": items, "path": ""})
+
+
+@app.get("/api/workspace/trash/file")
+async def api_workspace_trash_file(request: Request):
+    """Liefert den Inhalt einer Datei im Papierkorb."""
+    _require_token(request)
+    config = load_config()
+    trash_dir = Path(config.get("trash_dir") or "~/.trash").expanduser().resolve()
+    rel = request.query_params.get("path", "").strip().lstrip("/")
+    target = (trash_dir / rel).resolve()
+    if not str(target).startswith(str(trash_dir)):
+        raise HTTPException(status_code=403, detail="Pfad außerhalb des Papierkorbs")
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"error": "Datei nicht gefunden"})
+    ext = target.suffix.lower()
+    if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return JSONResponse({"type": "image", "name": target.name})
+    if ext == ".md":
+        try:
+            return JSONResponse({"type": "markdown", "content": target.read_text(errors="replace")})
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+    text_exts = {".txt", ".log", ".json", ".yaml", ".yml", ".py", ".sh", ".js", ".ts", ".csv", ".toml", ".ini", ".cfg"}
+    if ext in text_exts or target.stat().st_size < 500_000:
+        try:
+            return JSONResponse({"type": "text", "content": target.read_text(errors="replace")[:100_000]})
+        except Exception as e:
+            return JSONResponse({"error": str(e)})
+    return JSONResponse({"error": f"Dateityp '{ext}' wird nicht unterstützt"})
+
+
+@app.get("/api/workspace/trash/raw")
+async def api_workspace_trash_raw(request: Request):
+    """Liefert eine Datei aus dem Papierkorb als Binary (für Bilder)."""
+    _require_token(request)
+    config = load_config()
+    trash_dir = Path(config.get("trash_dir") or "~/.trash").expanduser().resolve()
+    rel = request.query_params.get("path", "").strip().lstrip("/")
+    target = (trash_dir / rel).resolve()
+    if not str(target).startswith(str(trash_dir)):
+        raise HTTPException(status_code=403, detail="Pfad außerhalb des Papierkorbs")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404)
+    _mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                 ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
+    media_type = _mime_map.get(target.suffix.lower())
+    return FileResponse(str(target), media_type=media_type)
+
+
+@app.post("/api/workspace/trash/empty")
+async def api_workspace_trash_empty(request: Request):
+    """Leert den Papierkorb."""
+    _require_token(request)
+    config = load_config()
+    trash_dir = Path(config.get("trash_dir") or "~/.trash").expanduser().resolve()
+    if not trash_dir.exists():
+        return JSONResponse({"ok": True})
+    for item in trash_dir.iterdir():
+        if item.is_dir():
+            shutil.rmtree(str(item))
+        else:
+            item.unlink()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/chats", response_class=HTMLResponse)
+async def chats_page(request: Request):
+    """Chatverlauf – Liste und Viewer für persistente Chat-Sessions."""
+    _require_token(request)
+    token = request.query_params.get("token", "") or request.cookies.get("ma_token", "")
+    tq = _token_query(token)
+    token_val = token.replace("?token=", "").replace("&token=", "")
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Gespeicherte Chats – MiniAssistant</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+{_COMMON_CSS}
+.container {{ max-width: 1400px !important; }}
+.ws-layout {{display:flex;gap:1rem;align-items:flex-start;height:calc(100vh - 180px)}}
+.ch-sidebar {{width:260px;flex-shrink:0;height:100%;display:flex;flex-direction:column}}
+.ch-list {{flex:1;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow-y:auto;overflow-x:hidden}}
+.ch-list ul {{list-style:none;margin:0;padding:0}}
+.ch-list li {{border-bottom:1px solid var(--border)}}
+.ch-list li:last-child {{border-bottom:none}}
+.ch-list a {{display:flex;flex-direction:column;padding:0.5rem 0.8rem;color:var(--text);text-decoration:none;cursor:pointer;gap:0.1rem}}
+.ch-list a:hover {{background:var(--border)}}
+.ch-list a.active {{background:var(--primary);color:#fff}}
+.ch-list a.active .ch-date {{color:rgba(255,255,255,0.75)}}
+.ch-title {{font-size:0.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.ch-date {{font-size:0.72rem;color:var(--muted)}}
+.ch-viewer {{flex:1;min-width:0;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.2rem;overflow:auto;height:100%}}
+.ch-viewer .md-body h1,.ch-viewer .md-body h2,.ch-viewer .md-body h3 {{margin-top:1rem}}
+.ch-viewer .md-body code {{background:var(--bg);padding:0.1em 0.3em;border-radius:3px;font-size:0.85em}}
+.ch-viewer .md-body pre {{background:var(--bg);padding:0.8rem;border-radius:var(--radius);overflow:auto}}
+.ch-viewer .md-body pre code {{background:none;padding:0}}
+.ch-viewer .md-body table {{border-collapse:collapse;width:100%}}
+.ch-viewer .md-body td,.ch-viewer .md-body th {{border:1px solid var(--border);padding:0.35rem 0.6rem}}
+.ch-viewer .md-body th {{background:var(--bg)}}
+.ch-viewer .md-body hr {{border:none;border-top:1px solid var(--border);margin:0.8rem 0}}
+.ch-viewer .msg {{padding:0.5em 0}}
+.ch-viewer .msg.msg-user {{text-align:right;padding-left:3em;border-right:3px solid var(--primary);padding-right:0.7em}}
+.ch-viewer .msg.msg-assistant {{border-left:3px solid var(--success);padding-left:0.7em}}
+.ch-viewer .msg-role {{font-weight:700;font-size:0.78em;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.25em}}
+.ch-viewer .msg-role.user {{color:var(--primary);text-align:right}}
+.ch-viewer .msg-role.assistant {{color:var(--success)}}
+.ch-viewer .msg .content {{line-height:1.6}}
+.ch-viewer .msg .content.markdown p {{margin:0.3em 0}}
+.ch-viewer .msg .content.markdown pre {{background:var(--bg);padding:0.6em;border-radius:6px;overflow-x:auto;font-size:0.9em}}
+.ch-viewer .msg .content.markdown code {{background:var(--bg);padding:0.15em 0.35em;border-radius:4px;font-size:0.9em}}
+.ch-viewer .msg-sep {{border:none;border-top:1px solid var(--border);margin:0.5em 0}}
+.ws-empty {{color:var(--muted);font-size:0.9rem;padding:1rem}}
+.ch-actions {{display:flex;gap:0.5rem;margin-bottom:0.8rem}}
+.ch-resume-btn {{background:var(--primary);color:#fff;border:none;border-radius:var(--radius);padding:0.4rem 0.9rem;cursor:pointer;font-size:0.85rem}}
+.ch-resume-btn:hover {{opacity:0.85}}
+</style>
+<script src="/static/marked.umd.js"></script>
+</head>
+<body>
+<div class="container">
+<div class="card">
+  <div class="usage-header" style="margin-bottom:1.2rem">
+    <img src="/static/miniassistant.png" alt="Logo" style="height:2rem;width:auto">
+    <h1>Gespeicherte Chats</h1>
+    <div class="usage-nav">
+      <a href="/chat{tq}{'&' if tq else '?'}track=1" class="btn btn-outline">Neuer Chat</a>
+      <a href="/{tq}" class="btn btn-outline">Startseite</a>
+    </div>
+  </div>
+  <div class="ws-layout">
+    <div class="ch-sidebar">
+      <div class="ch-list" id="ch-list"><div class="ws-empty">Lade...</div></div>
+    </div>
+    <div class="ch-viewer" id="ch-viewer"><div class="ws-empty">Konversation auswählen</div></div>
+  </div>
+</div>
+</div>
+<script>
+var CH_TOKEN = {repr(token_val)};
+
+function chApiUrl(endpoint, params) {{
+  var u = new URL('/api/chats/' + endpoint, location.origin);
+  if (CH_TOKEN) u.searchParams.set('token', CH_TOKEN);
+  if (params) Object.keys(params).forEach(function(k) {{ u.searchParams.set(k, params[k]); }});
+  return u.toString();
+}}
+
+function chEscape(s) {{
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+
+function chLoadList() {{
+  var list = document.getElementById('ch-list');
+  fetch(chApiUrl('files'))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (!data.items || !data.items.length) {{
+        list.innerHTML = '<div class="ws-empty">Noch keine Konversationen</div>';
+        return;
+      }}
+      var html = '<ul>';
+      data.items.forEach(function(item) {{
+        html += '<li><a data-stem="' + chEscape(item.stem) + '" title="' + chEscape(item.title) + '">'
+              + '<span class="ch-title">' + chEscape(item.title) + '</span>'
+              + '<span class="ch-date">' + chEscape(item.date) + '</span>'
+              + '</a></li>';
+      }});
+      html += '</ul>';
+      list.innerHTML = html;
+      list.querySelectorAll('a[data-stem]').forEach(function(a) {{
+        a.addEventListener('click', function(e) {{ e.preventDefault(); chLoadChat(a.getAttribute('data-stem')); }});
+      }});
+    }})
+    .catch(function(err) {{ list.innerHTML = '<div class="ws-empty">Fehler: ' + chEscape(String(err)) + '</div>'; }});
+}}
+
+function chLoadChat(stem) {{
+  document.querySelectorAll('#ch-list a').forEach(function(a) {{ a.classList.remove('active'); }});
+  document.querySelectorAll('#ch-list a[data-stem="' + stem.replace(/"/g,'\\"') + '"]').forEach(function(a) {{ a.classList.add('active'); }});
+  var viewer = document.getElementById('ch-viewer');
+  viewer.innerHTML = '<div class="ws-empty">Lade...</div>';
+  fetch(chApiUrl('file', {{stem: stem}}))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ viewer.innerHTML = '<div class="ws-empty">' + chEscape(data.error) + '</div>'; return; }}
+      var exchanges = data.exchanges || [];
+      var body = '';
+      exchanges.forEach(function(ex, i) {{
+        if (i > 0) body += '<hr class="msg-sep">';
+        body += '<div class="msg msg-user"><div class="msg-role user">Du</div>'
+              + '<div class="content">' + chEscape(ex.user) + '</div></div>'
+              + '<div class="msg msg-assistant"><div class="msg-role assistant">Assistent</div>'
+              + '<div class="content markdown">' + marked.parse(ex.assistant || '') + '</div></div>';
+      }});
+      viewer.innerHTML = '<div class="ch-actions"><button class="ch-resume-btn" id="ch-resume-btn">&#9654; Fortsetzen</button></div>'
+                       + '<p style="font-size:0.8rem;color:var(--muted);margin:0 0 1rem">'
+                       + chEscape((data.title || '') + (data.model ? ' · ' + data.model : '')) + '</p>'
+                       + (body || '<div class="ws-empty">Keine Nachrichten</div>');
+      document.getElementById('ch-resume-btn').addEventListener('click', function() {{ chResume(stem); }});
+    }})
+    .catch(function(err) {{ viewer.innerHTML = '<div class="ws-empty">Fehler: ' + chEscape(String(err)) + '</div>'; }});
+}}
+
+function chResume(stem) {{
+  fetch(chApiUrl('resume'), {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{stem:stem}})}})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.error) {{ alert(data.error); return; }}
+      window.location.href = '/chat{tq}{"&" if tq else "?"}resume_session=' + encodeURIComponent(data.session_id) + '&resume_stem=' + encodeURIComponent(stem) + '&track=1';
+    }})
+    .catch(function(err) {{ alert('Fehler: ' + err); }});
+}}
+
+chLoadList();
+</script>
+{_THEME_JS}
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/api/chats/files")
+async def api_chats_files(request: Request):
+    """Listet alle gespeicherten Chat-Sessions (neueste zuerst)."""
+    _require_token(request)
+    config = load_config()
+    chats_dir = _get_chats_dir(config)
+    if not chats_dir.exists():
+        return JSONResponse({"items": []})
+    import json as _json
+    items = []
+    for p in sorted(chats_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+            title = data.get("title") or p.stem
+        except Exception:
+            title = p.stem
+        try:
+            dt = datetime.datetime.strptime(p.stem[:15], "%Y-%m-%d_%H%M%S")
+            date_str = dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            date_str = p.stem
+        items.append({"stem": p.stem, "title": title, "date": date_str})
+    return JSONResponse({"items": items})
+
+
+@app.get("/api/chats/file")
+async def api_chats_file(request: Request):
+    """Liefert den Inhalt einer Chat-JSON-Datei."""
+    import json as _json
+    _require_token(request)
+    config = load_config()
+    chats_dir = _get_chats_dir(config)
+    stem = request.query_params.get("stem", "").strip().replace("/", "").replace("..", "")
+    if not stem:
+        return JSONResponse({"error": "Kein stem angegeben"})
+    target = (chats_dir / (stem + ".json")).resolve()
+    if not str(target).startswith(str(chats_dir.resolve())):
+        raise HTTPException(status_code=403)
+    if not target.exists():
+        return JSONResponse({"error": "Datei nicht gefunden"})
+    try:
+        return JSONResponse(_json.loads(target.read_text(encoding="utf-8")))
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
+
+@app.post("/api/chats/resume")
+async def api_chats_resume(request: Request):
+    """Lädt eine gespeicherte Chat-Session und erstellt daraus eine neue aktive Session."""
+    import json as _json
+    _require_token(request)
+    body = await request.json()
+    stem = (body.get("stem") or "").strip().replace("/", "").replace("..", "")
+    if not stem:
+        return JSONResponse({"error": "Kein stem angegeben"})
+    config = load_config()
+    chats_dir = _get_chats_dir(config)
+    sidecar = (chats_dir / (stem + ".json")).resolve()
+    if not str(sidecar).startswith(str(chats_dir.resolve())):
+        raise HTTPException(status_code=403)
+    if not sidecar.exists():
+        return JSONResponse({"error": "Keine gespeicherte Session für diesen Chat"})
+    try:
+        saved = _json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as e:
+        return JSONResponse({"error": f"Fehler beim Laden: {e}"})
+    project_dir = getattr(request.app.state, "project_dir", None)
+    session = create_session(None, project_dir)
+    session["messages"] = saved.get("messages", [])
+    if saved.get("model"):
+        session["model"] = saved["model"]
+    session["_chat_file"] = str(chats_dir / (stem + ".json"))
+    session["_chat_stem"] = stem
+    session["_track_chat"] = True
+    session_id = str(uuid.uuid4())
+    _sessions[session_id] = session
+    return JSONResponse({"session_id": session_id})
 
 
 @app.post("/api/onboarding/save")

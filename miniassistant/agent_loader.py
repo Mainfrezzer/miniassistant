@@ -114,6 +114,10 @@ def load_agent_files(agent_dir: str, max_chars_per_file: int = 500) -> dict[str,
 
 def _system_and_runtime_section(is_root: bool) -> str:
     """Host system + runtime info (OS, distro, package manager, init, root status) for the LLM."""
+    import datetime as _dt
+    now = _dt.datetime.now()
+    weekdays_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    date_str = f"{weekdays_de[now.weekday()]}, {now.strftime('%d.%m.%Y')} – {now.strftime('%H:%M')} Uhr"
     s = _detect_system()
     parts = [f"**{s['os']}** (Kernel: {s['release']}, {s['machine']})"]
     if s["distro"]:
@@ -129,7 +133,7 @@ def _system_and_runtime_section(is_root: bool) -> str:
         parts.append("Running as **root** – no sudo needed")
     else:
         parts.append("Not root – use **sudo** when needed")
-    return "## System\n" + ". ".join(parts) + ".\n\n"
+    return f"## System\n**Heute:** {date_str}\n\n" + ". ".join(parts) + ".\n\n"
 
 
 def _safety_section() -> str:
@@ -292,16 +296,19 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         "| `DEBATE.md` | Multi-round AI debate |\n"
         "| `AVATARS.md` | Bot profile picture |\n"
         "| `EMAIL.md` | IMAP/SMTP, multi-account, tracking, auto-reply |\n"
-        "| `VOICE.md` | Wyoming STT/TTS, voice setup, supported formats |\n\n"
+        "| `VOICE.md` | Wyoming STT/TTS, voice setup, supported formats |\n"
+        "| `CHAT_HISTORY.md` | How to find past conversations (date → memory file → summarize) |\n\n"
     )
 
 
 def _memory_section(project_dir: str | None) -> str:
     """Kurzer Memory-Auszug (letzte Tage, max Zeilen) für den System-Prompt."""
     mem = get_memory_for_prompt(project_dir, max_lines=400, days=2)
+    header = "## Memory (letzte 2 Tage)\n"
+    footer = "\n*(Ältere Gespräche: lies `CHAT_HISTORY.md` aus dem Docs-Verzeichnis — dort steht, wie du nach Datum suchst.)*\n\n"
     if not mem:
-        return ""
-    return "## Memory (Auszug)\n" + mem + "\n\n"
+        return header + "*(Keine Einträge für heute/gestern.)*" + footer
+    return header + mem + footer
 
 
 def _language_from_identity_md(identity_md: str) -> str:

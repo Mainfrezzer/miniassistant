@@ -33,6 +33,7 @@ DOC_FILES = [
     "VISION.md",
     "VOICE.md",
     "EMAIL.md",
+    "CHAT_HISTORY.md",
 ]
 
 

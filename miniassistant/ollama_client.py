@@ -424,7 +424,7 @@ def _tools_schema(
         "type": "function",
         "function": {
             "name": "save_config",
-            "description": "Update the app's config file. Your YAML is deep-merged into the existing config (existing keys are preserved). Validates, creates .bak backups, then writes. After saving, tell user to restart. Structure: providers.ollama.models.aliases for model aliases, providers.ollama.models.default for default model, chat_clients.matrix/discord for bots, search_engines for SearXNG, voice for Wyoming STT/TTS (voice.stt.url, voice.tts.url, voice.language, voice.tts.voice). Read CONFIG_REFERENCE.md for full structure and examples.",
+            "description": "CALL THIS FUNCTION to actually update the config. Writing YAML in your response text does NOT save anything — you MUST call this function. Your YAML is deep-merged into the existing config (existing keys are preserved). Validates, creates .bak backups, then writes. After saving, tell user to restart. Structure: providers.ollama.models.aliases for model aliases, providers.ollama.models.default for default model, providers.ollama.model_options.<model>.think for per-model thinking, chat_clients.matrix/discord for bots, search_engines for SearXNG, voice for Wyoming STT/TTS. Read CONFIG_REFERENCE.md for full structure.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -61,6 +61,13 @@ def run_exec(command: str, timeout: int = 60, cwd: str | None = None, extra_env:
             from pathlib import Path
             Path(cwd).mkdir(parents=True, exist_ok=True)
         env = {**os.environ, **(extra_env or {})}
+        # Ensure HOME is set so ~ expands correctly (may be missing in service environments)
+        if "HOME" not in env:
+            import pwd
+            try:
+                env["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+            except Exception:
+                env["HOME"] = "/root"
         result = subprocess.run(
             ["sh", "-c", command],
             capture_output=True,

@@ -1872,7 +1872,7 @@ def _run_subagent_anthropic(
     total_thinking = ""
     _ALLOWED_SUB_TOOLS = {"exec", "web_search", "check_url", "read_url"}
     rounds_used = 0
-    for _round in range(15):
+    for _round in range(int(config.get("max_tool_rounds", 15))):
         try:
             r = api_chat(
                 msgs, api_key=api_key, model=api_model,
@@ -1964,7 +1964,7 @@ def _run_subagent_google(
     total_thinking = ""
     _ALLOWED_SUB_TOOLS = {"exec", "web_search", "check_url", "read_url"}
     rounds_used = 0
-    for _round in range(15):
+    for _round in range(int(config.get("max_tool_rounds", 15))):
         try:
             r = google_chat(
                 msgs, api_key=api_key, model=api_model,
@@ -2114,7 +2114,7 @@ def _run_subagent_openai(
     total_thinking = ""
     _ALLOWED_SUB_TOOLS = {"exec", "web_search", "check_url", "read_url"}
     rounds_used = 0
-    for _round in range(15):
+    for _round in range(int(config.get("max_tool_rounds", 15))):
         try:
             r = openai_chat(
                 msgs, api_key=api_key, model=api_model,
