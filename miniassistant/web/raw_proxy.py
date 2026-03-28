@@ -28,22 +28,17 @@ router = APIRouter(prefix="/raw/v1", tags=["Raw OpenAI Proxy"])
 # ---------------------------------------------------------------------------
 
 def _require_token(request: Request) -> None:
-    """Prüft Token für Raw-Proxy. Generiert automatisch Token wenn raw_proxy.enabled=True aber kein Token gesetzt."""
+    """Prüft Token für Raw-Proxy."""
     import secrets as _secrets
-    from miniassistant.config import save_config as _save_config
     config = load_config()
     raw_cfg = config.get("raw_proxy") or {}
     if not raw_cfg.get("enabled", False):
         return  # Raw-Proxy deaktiviert → alles erlauben
-    
+
     expected = raw_cfg.get("token")
     if not expected:
-        # Kein Token konfiguriert → automatisch generieren und speichern
-        expected = _secrets.token_urlsafe(32)
-        config.setdefault("raw_proxy", {})["token"] = expected
-        _save_config(config)
-        _log.info("raw_proxy: Auto-generated token (use 'miniassistant token --raw-proxy' to view)")
-    
+        raise HTTPException(status_code=503, detail="Raw proxy token not initialized — restart the server")
+
     auth = request.headers.get("Authorization")
     token = None
     if auth and auth.startswith("Bearer "):
@@ -52,7 +47,7 @@ def _require_token(request: Request) -> None:
         token = request.query_params.get("token")
     if token and _secrets.compare_digest(token, expected):
         return
-    
+
     raise HTTPException(status_code=401, detail="Invalid or missing token")
 
 

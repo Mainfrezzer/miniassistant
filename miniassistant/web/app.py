@@ -1386,6 +1386,12 @@ async def api_config_save(request: Request):
                     orig_gh = orig_data.get("github_token")
                     if orig_gh:
                         content = content.replace(str(new_gh), orig_gh)
+                # raw_proxy.token
+                new_rp = (new_data.get("raw_proxy") or {}).get("token", "")
+                if new_rp and "****" in str(new_rp):
+                    orig_rp = (orig_data.get("raw_proxy") or {}).get("token")
+                    if orig_rp:
+                        content = content.replace(str(new_rp), orig_rp)
                 # email.password in accounts
                 new_emails = (new_data.get("email") or {}).get("accounts") or {}
                 orig_emails = (orig_data.get("email") or {}).get("accounts") or {}

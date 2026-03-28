@@ -519,6 +519,7 @@ def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
             "enabled": bool((data.get("raw_proxy") or {}).get("enabled", False)),
             "token": (data.get("raw_proxy") or {}).get("token"),
             "rate_limit": int((data.get("raw_proxy") or {}).get("rate_limit", 100) or 100),
+            "allowed_models": list((data.get("raw_proxy") or {}).get("allowed_models") or []),
         },
     }
 
@@ -653,5 +654,20 @@ def ensure_token(config: dict[str, Any]) -> str:
     if not token:
         token = secrets.token_urlsafe(32)
         config.setdefault("server", {})["token"] = token
+        save_config(config)
+    return token
+
+
+def ensure_raw_proxy_token(config: dict[str, Any]) -> str | None:
+    """Stellt sicher, dass raw_proxy.token gesetzt ist wenn raw_proxy.enabled=True.
+    Gibt None zurück wenn raw_proxy nicht aktiviert ist."""
+    import secrets
+    raw_cfg = config.get("raw_proxy") or {}
+    if not raw_cfg.get("enabled", False):
+        return None
+    token = raw_cfg.get("token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        config.setdefault("raw_proxy", {})["token"] = token
         save_config(config)
     return token

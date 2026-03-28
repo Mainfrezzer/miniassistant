@@ -17,6 +17,7 @@ from miniassistant.config import (
     load_config,
     save_config,
     ensure_token,
+    ensure_raw_proxy_token,
     config_path,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_BIND_PORT,
@@ -490,6 +491,7 @@ def serve(ctx: click.Context, host: str | None, port: int | None) -> None:
     h = host or config.get("server", {}).get("host", "127.0.0.1")
     p = port or config.get("server", {}).get("port", DEFAULT_BIND_PORT)
     token = ensure_token(config)
+    raw_proxy_token = ensure_raw_proxy_token(config)
     # Klickbare URLs mit echten IPs erzeugen (0.0.0.0 ist nicht klickbar)
     display_hosts: list[str] = []
     if h in ("0.0.0.0", "::"):
@@ -524,6 +526,8 @@ def serve(ctx: click.Context, host: str | None, port: int | None) -> None:
 
     console.print(f"Server: http://{h}:{p}")
     console.print("Token (für API/Web):", token)
+    if raw_proxy_token:
+        console.print("Raw-Proxy Token:   ", raw_proxy_token)
     # Warnung wenn Server auf allen Interfaces lauscht aber kein Token gesetzt ist
     if h in ("0.0.0.0", "::") and not (config.get("server") or {}).get("token"):
         console.print("[bold red]⚠ Sicherheitswarnung:[/bold red] Server lauscht auf allen Interfaces (0.0.0.0) ohne Token – alle Netzwerkteilnehmer haben uneingeschränkten Zugriff.")
@@ -590,12 +594,7 @@ def token_cmd(ctx: click.Context, regenerate: bool, raw_proxy: bool) -> None:
             save_config(config, ctx.obj.get("project_dir"))
             console.print("Neuer Raw-Proxy Token generiert und gespeichert.")
         else:
-            token = raw_cfg.get("token")
-            if not token:
-                import secrets
-                token = secrets.token_urlsafe(32)
-                config.setdefault("raw_proxy", {})["token"] = token
-                save_config(config, ctx.obj.get("project_dir"))
+            token = ensure_raw_proxy_token(config)
         console.print("Raw-Proxy Token:", token)
         return
     
