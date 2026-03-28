@@ -150,7 +150,8 @@ async def list_models(request: Request):
         base_url, api_key = _get_provider_url_and_key(prov_cfg)
         
         try:
-            url = f"{base_url.rstrip('/')}/v1/models"
+            _b = base_url.rstrip("/")
+            url = f"{_b}/models" if _b.endswith("/v1") else f"{_b}/v1/models"
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
@@ -218,7 +219,8 @@ async def chat_completions(request: Request):
     body = {**body, "model": resolved_model}
     
     # Request an Provider weiterleiten
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    _b = base_url.rstrip("/")
+    url = f"{_b}/chat/completions" if _b.endswith("/v1") else f"{_b}/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
     }
@@ -298,7 +300,8 @@ async def completions(request: Request):
         raise HTTPException(status_code=400, detail=f"No provider found for model: {model}")
     
     base_url, api_key = _get_provider_url_and_key(prov_cfg)
-    url = f"{base_url.rstrip('/')}/v1/completions"
+    _b = base_url.rstrip("/")
+    url = f"{_b}/completions" if _b.endswith("/v1") else f"{_b}/v1/completions"
     
     headers = {"Content-Type": "application/json"}
     if api_key:

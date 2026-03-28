@@ -40,6 +40,16 @@ def _api_headers(api_key: str | None) -> dict[str, str]:
     return headers
 
 
+def _api_url(base_url: str, path: str) -> str:
+    """Baut API-URL auf und verhindert /v1/v1-Dopplung.
+    path muss mit / beginnen (z.B. '/models', '/chat/completions').
+    Wenn base_url bereits auf /v1 endet, wird kein weiteres /v1 eingefügt."""
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}{path}"
+    return f"{base}/v1{path}"
+
+
 def _uses_max_completion_tokens(model: str) -> bool:
     """Erkennt Modelle die max_completion_tokens statt max_tokens benötigen.
     Betrifft: o-Serie (o1, o3, o4-mini, ...), GPT-5.x+, und alle neueren Modelle.
@@ -71,7 +81,7 @@ def api_list_models(
     Returns: Liste von {name, owned_by} Dicts.
     """
     # api_key ist optional für OpenAI-kompatible APIs (z.B. vLLM, llama.cpp)
-    url = f"{base_url.rstrip('/')}/v1/models"
+    url = _api_url(base_url, "/models")
     try:
         r = httpx.get(url, headers=_api_headers(api_key), timeout=_TIMEOUT)
         r.raise_for_status()
@@ -347,7 +357,7 @@ def api_chat(
     """
     # api_key ist optional für OpenAI-kompatible APIs (z.B. vLLM, llama.cpp)
 
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    url = _api_url(base_url, "/chat/completions")
 
     # Messages konvertieren (System-Prompt wird in Messages eingebaut)
     api_msgs = _convert_messages(messages, system=system)
@@ -445,7 +455,7 @@ def api_chat_stream(
     """
     # api_key ist optional für OpenAI-kompatible APIs (z.B. vLLM, llama.cpp)
 
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    url = _api_url(base_url, "/chat/completions")
     api_msgs = _convert_messages(messages, system=system)
 
     _use_mct = _uses_max_completion_tokens(model)
@@ -580,7 +590,7 @@ def api_generate_image(
     Returns: {url: str, revised_prompt: str} oder {b64_json: str, revised_prompt: str}.
     """
     # api_key ist optional für OpenAI-kompatible APIs (z.B. vLLM, llama.cpp)
-    url = f"{base_url.rstrip('/')}/v1/images/generations"
+    url = _api_url(base_url, "/images/generations")
     body: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
