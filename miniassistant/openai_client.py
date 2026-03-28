@@ -389,6 +389,7 @@ def api_chat(
     openai_tools = _convert_tools(tools or [])
     if openai_tools:
         body["tools"] = openai_tools
+        body["parallel_tool_calls"] = True  # llama.cpp/llama-swap benötigt dies explizit für mehrere Tool-Calls
 
     headers = _api_headers(api_key)
     _log.debug("OpenAI API: model=%s, msgs=%d, thinking=%s", model, len(api_msgs), thinking)
@@ -474,6 +475,7 @@ def api_chat_stream(
     openai_tools = _convert_tools(tools or [])
     if openai_tools:
         body["tools"] = openai_tools
+        body["parallel_tool_calls"] = True  # llama.cpp/llama-swap benötigt dies explizit für mehrere Tool-Calls
 
     headers = _api_headers(api_key)
 

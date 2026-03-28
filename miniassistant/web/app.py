@@ -2328,6 +2328,8 @@ async def logs_page(request: Request):
     #log-box .label {{ color: #569cd6; font-weight: bold; }}
     #log-box .tool {{ color: #ce9178; }}
     #log-box .user {{ color: #dcdcaa; }}
+    #log-box .subagent {{ color: #c586c0; font-weight: bold; }}
+    #log-box .subagent-model {{ color: #9cdcfe; }}
     .empty-hint {{ color: var(--muted); font-style: italic; text-align: center; margin-top: 3em; }}
     .log-status {{ font-size: 0.8em; color: var(--muted); padding-top: 0.3em; flex-shrink: 0; display: flex; align-items: center; gap: 1em; }}
     .live-dot {{ width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; animation: pulse 1.5s infinite; }}
@@ -2402,6 +2404,8 @@ async def logs_page(request: Request):
           .replace(/\\[(\\d{{4}}-\\d{{2}}-\\d{{2}} \\d{{2}}:\\d{{2}}:\\d{{2}})\\]/g, '[<span class="ts">$1</span>]')
           .replace(/(PROMPT|THINKING|RESPONSE)/g, '<span class="label">$1</span>')
           .replace(/(TOOL\\s+\\S+)/g, '<span class="tool">$1</span>')
+          .replace(/(SUBAGENT_RESULT|SUBAGENT_THINKING)(\\s+model=\\S+)/g, '<span class="subagent">$1</span><span class="subagent-model">$2</span>')
+          .replace(/(SUBAGENT)(\\s+model=\\S+)/g, '<span class="subagent">$1</span><span class="subagent-model">$2</span>')
           .replace(/(User:)/g, '<span class="user">$1</span>');
       }}
 

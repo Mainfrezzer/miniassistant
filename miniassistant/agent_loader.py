@@ -332,7 +332,7 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         "- **Aufgabe:** What the executing agent must DO — action-oriented ('Hole X', 'Prüfe Y', 'Erstelle Z'). NOT setup language ('Erlaube dem User...', 'Erstelle einen Token...').\n"
         "- **Methode:** Exact API endpoints, tool calls, commands — everything the agent needs to execute without guessing.\n"
         "- **Credentials/Tokens:** Already available — write as 'use token X' or include the value directly. NEVER write 'Token muss erstellt werden' or prerequisites that are not yet fulfilled.\n"
-        "- **Output format:** Exact structure expected as response.\n"
+        "- **Output format:** Exact structure expected as response. **CRITICAL: Never show format examples inside ` ``` ` code blocks** — the executing agent mirrors whatever wrapper you use. Show the example as raw Markdown directly. Add an explicit note: 'Kein Codeblock — direkt als Markdown ausgeben.'\n"
         "**What NOT to include:** Setup instructions, prerequisites that aren't already done, references to the current session, vague descriptions like 'fetch data somehow'.\n\n"
         "**curl/shell in directions — CRITICAL:**\n"
         "- JSON body (`-d '...'`) must be a single line — no literal newlines inside the value\n"
@@ -571,7 +571,24 @@ def _tools_section(config: dict[str, Any]) -> str:
         for p in providers.values() if isinstance(p, dict)
     )
     if subagent_list or any_per_provider:
-        sub_display = [f"`{m}`" for m in subagent_list] if subagent_list else []
+        # Global subagents list: show full name + any aliases from the matching provider
+        sub_display = []
+        if subagent_list:
+            default_prov = next(iter(providers), "")
+            for m in subagent_list:
+                # Determine provider from "provider/model" or default
+                if "/" in m:
+                    prov_name, model_name = m.split("/", 1)
+                else:
+                    prov_name, model_name = default_prov, m
+                prov_cfg = providers.get(prov_name) or {}
+                aliases = (prov_cfg.get("models") or {}).get("aliases") or {}
+                matching_aliases = [alias for alias, target in aliases.items() if target == model_name]
+                if matching_aliases:
+                    alias_str = ", ".join(f"`{a}`" for a in matching_aliases)
+                    sub_display.append(f"`{m}` (aliases: {alias_str})")
+                else:
+                    sub_display.append(f"`{m}`")
         if not sub_display and any_per_provider:
             # Fallback: per-provider Modelle sammeln
             default_prov = next(iter(providers), "ollama")
@@ -595,11 +612,12 @@ def _tools_section(config: dict[str, Any]) -> str:
             "  Present the subagent's result directly — never redo it yourself.\n"
             "  **Parallel execution:** Multiple tool calls in a single response run concurrently for: invoke_model, web_search, read_url, check_url, read_email.\n"
             "  When you have multiple independent tasks (e.g. delegate to 3 subagents, or search 4 sources), call ALL of them in ONE response — they execute in parallel, saving time.\n"
-            "  Do NOT call them one by one in separate rounds when they are independent."
+            "  Do NOT call them one by one in separate rounds when they are independent.\n"
+            "  **CRITICAL — user requests 'N parallel workers':** When the user explicitly asks for N parallel subagents/workers, you MUST output ALL N `invoke_model` calls in your very first response — not one per round. Generating them one at a time defeats the purpose and ignores the user's explicit instruction. Split the task into N independent sub-tasks and emit all N calls simultaneously."
         )
         if sub_display:
-            lines.append(f"  **Available subagents (use ONLY these exact names):** {', '.join(sub_display)}.\n"
-                         f"  Do NOT invent, abbreviate, or modify model names. Use EXACTLY one of the names listed above.")
+            lines.append(f"  **Available subagents:** {', '.join(sub_display)}.\n"
+                         f"  Use the full name (e.g. `llama-swap/qwen3-35b-a3b`) or any listed alias (e.g. `qwen`). Do NOT invent names not listed here.")
         lines.append(
             "- `debate`: Start a **structured multi-round debate/discussion** between two AI perspectives.\n"
             "  **IMPORTANT: Use this tool when the user says things like:** 'diskutiere mit einem Subworker', 'halte eine Diskussion', "

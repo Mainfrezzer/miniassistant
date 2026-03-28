@@ -171,21 +171,70 @@ except ImportError:
 def _resolve_vision_model(config: dict[str, Any], current_model: str) -> str | None:
     """Prüft ob das aktuelle Modell Vision unterstützt. Wenn nicht, wird das konfigurierte Vision-Modell zurückgegeben.
     Returns: Modellname (vision-fähig) oder None wenn kein Vision-Modell verfügbar."""
-    # Google/OpenAI/Anthropic sind nativ multimodal → kein Wechsel nötig
     provider_type = get_provider_type(config, current_model)
-    if provider_type in ("google", "openai", "openai-compat", "anthropic"):
-        return current_model
-    # Ollama: Capabilities prüfen
-    base_url = get_base_url_for_model(config, current_model)
-    if model_supports_vision(base_url, current_model):
-        return current_model
-    # Aktuelles Modell hat keine Vision → konfiguriertes Vision-Modell nutzen
     vision_models = get_vision_models(config)
+
+    # Google/OpenAI/Anthropic Cloud-APIs sind nativ multimodal → kein Wechsel nötig
+    if provider_type in ("google", "openai", "anthropic"):
+        return current_model
+
+    # Explizit als Vision-Modell konfiguriert → behalten (normalisiert mit/ohne Provider-Prefix)
+    def _norm(m: str) -> str:
+        return m.split("/", 1)[-1] if "/" in m else m
+    current_norm = _norm(current_model)
+    for vm in vision_models:
+        if vm == current_model or _norm(vm) == current_norm:
+            return current_model
+
+    # openai-compat/ollama: Modell ist NICHT in der Vision-Liste → Vision-Modell nutzen
+    if provider_type == "ollama":
+        base_url = get_base_url_for_model(config, current_model)
+        if model_supports_vision(base_url, current_model):
+            return current_model
+
     if vision_models:
         vm = vision_models[0]
         _log.info("Vision: Modell %s hat keine Vision-Unterstützung, wechsle zu %s", current_model, vm)
         return vm
     return None
+
+
+def describe_images_with_vl_model(
+    config: dict[str, Any],
+    images: list[dict[str, Any]],
+    user_text: str,
+    main_model: str,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """Beschreibt Bilder via VL-Modell und gibt (erweiterter_user_text, images_für_hauptagent) zurück.
+    Falls kein VL-Routing nötig (Hauptmodell selbst vision-fähig): gibt (user_text, images) unverändert zurück.
+    Falls VL-Routing: Bildbeschreibung wird injiziert, images=None zurückgegeben (Hauptagent braucht Rohdaten nicht mehr)."""
+    if not images:
+        return user_text, images
+    vision_model = _resolve_vision_model(config, main_model)
+    if not vision_model or vision_model == main_model:
+        return user_text, images
+    # VL-Modell nur für Bildbeschreibung — minimaler Prompt
+    try:
+        _vl_system = (
+            "You are a vision assistant. Describe the image(s) accurately and in detail. "
+            "Just describe what you see — no additional commentary."
+        )
+        _vl_user = user_text.strip() or "Describe this image in detail."
+        _vl_resp = _dispatch_chat(
+            config, vision_model,
+            [{"role": "user", "content": _vl_user, "images": images}],
+            system=_vl_system, think=False, tools=None, timeout=120.0,
+        )
+        _vl_desc = (_vl_resp.get("message") or {}).get("content") or ""
+        if _vl_desc.strip():
+            prefix = f"[Bild-Analyse von {vision_model}]:\n{_vl_desc.strip()}"
+            combined = f"{prefix}\n\n[Nutzer-Nachricht]: {user_text}" if user_text.strip() else prefix
+            _log.info("Vision: Bildbeschreibung via %s injiziert (%d chars)", vision_model, len(_vl_desc))
+            return combined, None
+        _log.warning("Vision: VL-Modell %s hat keine Beschreibung geliefert", vision_model)
+    except Exception as _vl_err:
+        _log.warning("Vision: Bildbeschreibung via %s fehlgeschlagen: %s", vision_model, _vl_err)
+    return user_text, images
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2253,7 +2302,8 @@ def _run_subagent_openai(
     api_key = get_api_key_for_model(config, resolved_name)
     base_url = get_base_url_for_model(config, resolved_name)
     think = get_think_for_model(config, resolved_name)
-    if not api_key:
+    prov_type = get_provider_type(config, resolved_name)
+    if not api_key and prov_type != "openai-compat":
         err = "OpenAI API: api_key erforderlich (in Provider-Config setzen)"
         _aal.log_subagent_result(config, resolved_name, err, "")
         return err
@@ -3688,14 +3738,12 @@ def handle_user_input(
 
     # Vision: wenn Bilder vorhanden, automatisch zum Vision-Modell wechseln (falls nötig)
     if images:
-        original_model = model
-        model = _resolve_vision_model(config, model)
-        if not model:
+        vision_model = _resolve_vision_model(config, model)
+        if not vision_model:
             return "Kein Vision-Modell konfiguriert. Bitte `vision` in der Config setzen (z.B. `vision: llava:13b`).", session, None, None, None, None
         mime_types = [img.get("mime_type", "?") if isinstance(img, dict) else "?" for img in images]
-        _aal.log_image_received(config, len(images), mime_types, vision_model=model if model != original_model else "")
-        if model != original_model:
-            _log.info("Vision: %d Bild(er) empfangen, wechsle %s → %s", len(images), original_model, model)
+        _aal.log_image_received(config, len(images), mime_types, vision_model=vision_model if vision_model != model else "")
+        rest, images = describe_images_with_vl_model(config, images, rest, model)
 
     # Chat-Kontext (room_id/channel_id) in System-Prompt injizieren
     # Werte sanitisieren: Newlines und Backticks entfernen (Prompt-Injection via Raumnamen)

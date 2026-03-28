@@ -26,6 +26,7 @@ from miniassistant.ollama_client import resolve_model, get_provider_config, get_
 from miniassistant.chat_loop import (
     chat_round,
     chat_round_stream,
+    describe_images_with_vl_model,
 )
 from miniassistant.memory import append_exchange
 
@@ -151,24 +152,40 @@ async def get_model(request: Request, model_id: str):
 #  POST /v1/chat/completions
 # ---------------------------------------------------------------------------
 
-def _openai_messages_to_internal(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _openai_messages_to_internal(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Konvertiert OpenAI-Format messages in das interne MiniAssistant-Format.
-    Entfernt system messages (die werden separat als system_prompt injiziert)."""
+    Entfernt system messages (die werden separat als system_prompt injiziert).
+    Gibt (messages, images) zurück — images aus dem letzten User-Message extrahiert."""
     out: list[dict[str, Any]] = []
-    for msg in messages:
+    images: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
         role = msg.get("role", "user")
         if role == "system":
-            continue  # wird vom Agent-Kontext uebernommen
+            continue
         content = msg.get("content", "")
-        # OpenAI erlaubt content als Liste von {type, text/image_url}
+        is_last_user = (role == "user" and i == len(messages) - 1)
         if isinstance(content, list):
             text_parts = []
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
                     text_parts.append(part.get("text", ""))
+                elif part.get("type") == "image_url" and is_last_user:
+                    url = (part.get("image_url") or {}).get("url", "")
+                    if url.startswith("data:"):
+                        # data:image/jpeg;base64,/9j/...
+                        try:
+                            meta, b64 = url.split(",", 1)
+                            mime = meta.split(";")[0].split(":", 1)[1]
+                            images.append({"data": b64, "mime_type": mime})
+                        except Exception:
+                            pass
             content = "\n".join(text_parts)
         out.append({"role": role, "content": content or ""})
-    return out
+    return out, images
 
 
 def _extract_user_system_message(messages: list[dict[str, Any]]) -> str | None:
@@ -308,17 +325,21 @@ async def chat_completions(request: Request):
         )
 
     # --- Messages konvertieren (ohne system role) ---
-    internal_messages = _openai_messages_to_internal(messages_raw)
+    internal_messages, api_images = _openai_messages_to_internal(messages_raw)
     if not internal_messages:
         raise HTTPException(status_code=400, detail="No user/assistant messages provided")
 
     completion_id = _make_completion_id()
     model_display = model_requested or resolved
 
+    # --- Vision: Bildbeschreibung via VL-Modell injizieren (falls nötig) ---
+    # api_images werden nur für den letzten User-Message verwendet (bereits extrahiert oben)
+    _vl_images = api_images or None
+
     # --- Streaming ---
     if stream:
         return StreamingResponse(
-            _stream_generator(config, resolved, internal_messages, system_prompt, completion_id, model_display, project_dir),
+            _stream_generator(config, resolved, internal_messages, system_prompt, completion_id, model_display, project_dir, _vl_images),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -333,11 +354,17 @@ async def chat_completions(request: Request):
     if history_messages and history_messages[-1].get("role") == "user":
         user_content = history_messages.pop().get("content", "")
 
+    # Vision: Bildbeschreibung via VL-Modell injizieren (falls nötig)
+    _ns_images = _vl_images
+    if _ns_images:
+        user_content, _ns_images = describe_images_with_vl_model(config, _ns_images, user_content, resolved)
+
     try:
         # chat_round loggt intern (PROMPT, TOOL, RESPONSE) — kein extra Logging hier
         content, thinking, new_messages, _debug, _switch = chat_round(
             config, history_messages, system_prompt, resolved,
             user_content, project_dir,
+            images=_ns_images,
         )
     except Exception as e:
         _log.error("Chat completion error: %s", e)
@@ -360,6 +387,7 @@ def _stream_generator(
     completion_id: str,
     model_display: str,
     project_dir: str | None = None,
+    images: list[dict[str, Any]] | None = None,
 ):
     """SSE-Stream-Generator im OpenAI-Format (data: {...}\\n\\n).
     Nutzt chat_round_stream für vollständige Tool-Execution."""
@@ -379,6 +407,10 @@ def _stream_generator(
     if history_messages and history_messages[-1].get("role") == "user":
         user_content = history_messages.pop().get("content", "")
 
+    # Vision: Bildbeschreibung via VL-Modell injizieren (falls nötig)
+    if images:
+        user_content, images = describe_images_with_vl_model(config, images, user_content, model)
+
     total_content = ""
     total_thinking = ""
 
@@ -386,6 +418,7 @@ def _stream_generator(
         for ev in chat_round_stream(
             config, history_messages, system_prompt, model,
             user_content, project_dir,
+            images=images,
         ):
             ev_type = ev.get("type")
             if ev_type == "thinking" and ev.get("delta"):
