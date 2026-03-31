@@ -310,8 +310,12 @@ async def chat_completions(request: Request):
             detail="No model specified and no default model configured",
         )
 
+    # --- API-Kontext setzen (Platform-Info für Schedule-Tool und System-Prompt) ---
+    config["_chat_context"] = {"platform": "api"}
+
     # --- System-Prompt (Agent-Kontext) aufbauen ---
     system_prompt = build_system_prompt(config, project_dir)
+    system_prompt += "\n\n## Current Chat Context\nPlatform: api"
 
     # Optionaler user system message an Agent-Prompt anhaengen
     # Wrapped as quoted user context to prevent injection into core agent instructions

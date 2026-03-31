@@ -182,6 +182,9 @@ def _send_to_client(message: str, client: str | None, room_id: str | None = None
     if not message:
         logger.warning("_send_to_client: Leere Nachricht — überspringe (kein Content produziert)")
         return
+    if client == "none":
+        logger.info("_send_to_client: client='none' — Ergebnis wird nicht gesendet (nur geloggt)")
+        return
     try:
         from miniassistant.notify import send_notification
         results = send_notification(message, client=client, room_id=room_id, channel_id=channel_id)

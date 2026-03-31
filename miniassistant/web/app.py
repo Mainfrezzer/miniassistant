@@ -1718,7 +1718,11 @@ async def api_chat_stream(request: Request):
     _session_last_access[session_id] = time.time()
 
     # Cancellation-User-ID setzen (damit chat_round_stream bei Disconnect abbrechen kann)
+    # chat_context auf Session setzen (für handle_user_input → System-Prompt-Injection + Tools)
+    if "chat_context" not in session:
+        session["chat_context"] = {"platform": "web", "user_id": f"web:{session_id}"}
     session["config"].setdefault("_chat_context", {})["user_id"] = f"web:{session_id}"
+    session["config"]["_chat_context"]["platform"] = "web"
 
     # Lokale Tools: Client übergibt Liste der Tools die er selbst ausführt
     _local_tools = body.get("local_tools")

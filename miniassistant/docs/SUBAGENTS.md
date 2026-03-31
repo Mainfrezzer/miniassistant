@@ -47,6 +47,13 @@ Multiple tool calls returned in a **single response** are executed concurrently 
 - **Do this whenever tasks are independent.** Example: "search 4 sources" → 4× `web_search` in one response, not 4 sequential rounds.
 - Sequential tools (exec, save_config, schedule) still run one at a time.
 
+**When NOT to parallelize** — run sequentially instead:
+- Tasks write to the **same file** → parallel writes cause data loss/corruption
+- Task B **depends on the result** of task A → ordering required
+- Tasks modify **shared state** (same config section, same API resource, same schedule)
+- The target API has **rate limits** that concurrent requests would exceed
+- **If unsure** whether tasks are truly independent: default to sequential.
+
 ## Message guidelines
 
 The message to the subagent must be self-contained — the subagent has no conversation history. Include:
@@ -56,6 +63,8 @@ The message to the subagent must be self-contained — the subagent has no conve
 - If a plan file exists: "Arbeite gemäß Plan in [PFAD]. Markiere jeden Schritt als [x] wenn erledigt, [!] wenn fehlgeschlagen."
 
 **Transfer your knowledge.** If you already know the correct approach — the right API endpoint, the exec command that works, the tool to use — include it in the message. The subagent has no session context and will have to discover everything from scratch otherwise, likely getting it wrong.
+
+**Directions → subagent:** If the task is covered by a directions file, do NOT pass the file path — the subagent should not have to discover or read it. Instead: read the file yourself, extract the relevant task section (Aufgabe + Methode + Ausgabe-Format), and paste it directly into the invoke_model message. The subagent gets exactly what it needs, nothing more.
 
 Example — wrong:
 > "Track my package on example-shop.com"

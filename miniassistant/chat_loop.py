@@ -710,11 +710,12 @@ def _compact_history(
     reserve = int(num_ctx * 0.15)
 
     # Split: neueste Messages behalten (innerhalb reserve), Rest zusammenfassen
+    # Mindestens 2 Messages immer behalten (user+assistant-Paar bleibt intakt)
     recent: list[dict[str, Any]] = []
     recent_tokens = 0
     for msg in reversed(messages):
         t = _message_tokens_estimate(msg)
-        if recent_tokens + t > reserve and recent:
+        if recent_tokens + t > reserve and len(recent) >= 2:
             break
         recent.insert(0, msg)
         recent_tokens += t
@@ -2630,9 +2631,11 @@ def _extract_tool_calls(message: dict[str, Any]) -> list[tuple[str, dict[str, An
       Format 1 (JSON):  <tool_call>{"name": "x", "arguments": {...}}</tool_call>
       Format 2 (XML):   <tool_call><function=x><parameter=k>v</parameter>...</function></tool_call>
       Format 2b:        wie Format 2, ohne schließende Tags (lenient)
+      Format 2c:        wie Format 2b, auch ohne </tool_call> (z.B. bei Heredoc)
       Format 3:         <tools>{"name": "x", "arguments": {...}}</tools>
       Format 4:         {"tool_calls": [{"name": "x", "arguments": {...}}, ...]}
       Format 5:         <function=x><parameter=k>v</parameter></function>  (ohne <tool_call> Wrapper)
+      Format 5b:        wie Format 5, ohne schließendes </function>
       Format 6:         {"name": "x", "arguments": {...}}  (nacktes JSON-Objekt)
     """
     out = []
@@ -2718,6 +2721,24 @@ def _extract_tool_calls(message: dict[str, Any]) -> list[tuple[str, dict[str, An
                     if name:
                         out.append((name, args))
                         _log.info("Tool-Call (XML-lenient) aus <tool_call> extrahiert: %s %s", name, args)
+        # Format 2c: <tool_call> Wrapper ohne schließendes </tool_call>
+        # Modell generierte Closing-Tag nicht (z.B. bei Heredoc-Kommandos)
+        if not out and "<tool_call>" in content:
+            for m in _re.finditer(
+                r'<tool_call>\s*<function=(\w+)>(.*?)(?=<tool_call>|\Z)',
+                content, _re.DOTALL
+            ):
+                name = m.group(1)
+                body = m.group(2)
+                args = {}
+                for pm in _re.finditer(r'<parameter=(\w+)>(.*?)</parameter>', body, _re.DOTALL):
+                    args[pm.group(1)] = pm.group(2).strip()
+                if not args:
+                    for pm in _re.finditer(r'<parameter=(\w+)>(.*?)(?=<parameter=|\Z)', body, _re.DOTALL):
+                        args[pm.group(1)] = pm.group(2).strip()
+                if name and args:
+                    out.append((name, args))
+                    _log.info("Tool-Call (Format 2c <tool_call> ohne Tags) extrahiert: %s %s", name, args)
         # Format 5: Bare <function=name><parameter=key>value</parameter></function>
         # (Kein <tool_call>-Wrapper — manche Modelle lassen ihn weg oder haben nur </tool_call>)
         if not out and "<function=" in content:
@@ -2735,6 +2756,24 @@ def _extract_tool_calls(message: dict[str, Any]) -> list[tuple[str, dict[str, An
                 if name:
                     out.append((name, args))
                     _log.info("Tool-Call (Format 5 bare <function>) extrahiert: %s %s", name, args)
+        # Format 5b: Bare <function= ohne schließendes </function>
+        # Modell generierte Closing-Tag nicht
+        if not out and "<function=" in content:
+            for m in _re.finditer(
+                r'<function=(\w+)>(.*?)(?=<function=|\Z)',
+                content, _re.DOTALL
+            ):
+                name = m.group(1)
+                body = m.group(2)
+                args = {}
+                for pm in _re.finditer(r'<parameter=(\w+)>(.*?)</parameter>', body, _re.DOTALL):
+                    args[pm.group(1)] = pm.group(2).strip()
+                if not args:
+                    for pm in _re.finditer(r'<parameter=(\w+)>(.*?)(?=<parameter=|\Z)', body, _re.DOTALL):
+                        args[pm.group(1)] = pm.group(2).strip()
+                if name and args:
+                    out.append((name, args))
+                    _log.info("Tool-Call (Format 5b bare ohne Tags) extrahiert: %s %s", name, args)
         # Format 3: <tools>{"name": "...", "arguments": {...}}</tools>
         # (Manche Modelle, z.B. qwen3-next, nutzen dieses Format statt <tool_call>)
         if not out and "<tools>" in content:
@@ -3215,8 +3254,31 @@ def chat_round_stream(
     rounds = 0
     _stream_start = time.monotonic()  # Gesamtzeit für TPS-Berechnung im done-Event
     _ctx_max = _compact_num_ctx  # num_ctx für Kontext-Auslastungsanzeige (bereits berechnet)
+    _last_real_ctx: int | None = None   # Exact prompt_eval_count from last Ollama response
+    _msgs_len_at_call: int = len(msgs)  # msgs.length at last Ollama call (for delta estimation)
 
     while rounds < max_tool_rounds:
+        # Per-round smart compaction: after round 0, check if tool results grew context past budget.
+        # Use prompt_eval_count from last response (accurate) + delta estimate for new messages.
+        if rounds > 0 and len(msgs) >= 6:
+            _new_delta = _messages_token_estimate(msgs[_msgs_len_at_call:])
+            _ctx_for_check = (
+                (_last_real_ctx + _new_delta) if _last_real_ctx is not None
+                else (
+                    _estimate_tokens(system_prompt)
+                    + _estimate_tokens(json.dumps(tools_schema or [], ensure_ascii=False))
+                    + _messages_token_estimate(msgs)
+                )
+            )
+            if _ctx_for_check > _context_budget(config, _compact_num_ctx):
+                _log.info("Per-round compact triggered (round=%d, ctx=%d, budget=%d)",
+                          rounds, _ctx_for_check, _context_budget(config, _compact_num_ctx))
+                yield {"type": "status", "message": "Chat-Verlauf wird komprimiert…"}
+                msgs = _compact_history(config, msgs, models_to_try[0] if rounds == 0 else effective_model,
+                                        system_prompt, tools_schema, _compact_num_ctx)
+                _last_real_ctx = None
+                _msgs_len_at_call = len(msgs)
+                yield {"type": "status", "message": "Verlauf komprimiert."}
         try_model = models_to_try[0] if rounds == 0 else effective_model
         effective_model = try_model
         # Provider-Präfix auflösen: base_url + clean model name + api_key für API
@@ -3244,6 +3306,7 @@ def chat_round_stream(
         round_thinking = ""
         round_content = ""
         round_tool_calls_raw: list[dict[str, Any]] = []
+        _msgs_len_at_call = len(msgs)   # snapshot for per-round delta estimation
         _t0_stream = time.monotonic()
         _stream_usage_type = "vision" if images else "chat"
         try:
@@ -3327,6 +3390,13 @@ def chat_round_stream(
                             round_tool_calls_raw.append(tc)
                         if chunk.get("done"):
                             last_response = chunk
+                            if chunk.get("prompt_eval_count"):
+                                _last_real_ctx = chunk["prompt_eval_count"]
+                                _est = (_estimate_tokens(system_effective)
+                                        + _estimate_tokens(json.dumps(tools or [], ensure_ascii=False))
+                                        + _messages_token_estimate(msgs))
+                                _log.debug("Token count: ollama=%d, estimate=%d, ratio=%.2f",
+                                           _last_real_ctx, _est, _last_real_ctx / _est if _est else 0)
                             break
                     # Stream-Buffer flushen (unvollständige/falsche Tag-Anfänge)
                     if _tc_stream_buf:
@@ -3386,6 +3456,22 @@ def chat_round_stream(
         # Die Inhalts-Deltas wurden bereits live an den Client gestreamt.
         if not tool_calls:
             total_content += round_content
+
+        # Announce-without-doing nudge: model announced tool usage in text but emitted no tool call.
+        # Detects short announcements (< 600 chars) where thinking mentioned tool names → retry.
+        _TOOL_ANNOUNCE_KEYS = ("invoke_model", "web_search", "read_url", "check_url", "exec", "send_email", "schedule", "debate")
+        if (not tool_calls
+                and round_content.strip()
+                and not _sent_image
+                and round_thinking
+                and any(k in round_thinking for k in _TOOL_ANNOUNCE_KEYS)
+                and len(round_content.strip()) < 600
+                and rounds < max_rounds - 1):
+            _log.info("Announce-without-doing nudge (rounds=%d): thinking mentioned tools but no tool call emitted", rounds)
+            total_content = total_content[:-len(round_content)]  # revert premature accumulation
+            msgs.append({"role": "user", "content": "STOP. You announced that you would call tools but did NOT emit any tool call. Call your tools RIGHT NOW — do not describe, just emit the tool call immediately."})
+            rounds += 1
+            continue
 
         if not tool_calls:
             # Content/Thinking aus den gestreamten Deltas verwenden (Done-Chunk hat oft leere Werte)
@@ -3475,7 +3561,8 @@ def chat_round_stream(
                 "" if _sent_image else total_content.strip(), total_thinking.strip())
             # TPS: letzte Runde (_t0_stream) verwenden — schließt Tool-Wartezeit aus
             _done_tps = _aal.extract_tps(last_response, time.monotonic() - _t0_stream, _done_content, _done_thinking)
-            yield {"type": "done", "thinking": _done_thinking, "content": _done_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _done_tps, "ctx": [_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs), _ctx_max]}
+            _ctx_used = _last_real_ctx or (_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs))
+            yield {"type": "done", "thinking": _done_thinking, "content": _done_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _done_tps, "ctx": [_ctx_used, _ctx_max]}
             return
 
         _tool_names = [n for n, _ in tool_calls]

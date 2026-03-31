@@ -35,6 +35,7 @@ DOC_FILES = [
     "EMAIL.md",
     "CHAT_HISTORY.md",
     "WEB_FETCHING.md",
+    "DIRECTIONS.md",
 ]
 
 
