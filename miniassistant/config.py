@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,17 @@ DEFAULT_BIND_PORT = 8765
 DEFAULT_AGENT_DIR = "agent"
 DEFAULT_MAX_CHARS_PER_FILE = 500
 CONFIG_FILENAME = "config.yaml"
+
+# ---------------------------------------------------------------------------
+# Config-RAM-Cache: vermeidet Disk-I/O + YAML-Parse bei jedem Aufruf.
+# Invalidiert automatisch nach _CONFIG_CACHE_TTL Sekunden und bei save_config.
+# ---------------------------------------------------------------------------
+_config_cache: dict[str, Any] | None = None
+_config_cache_path: str = ""       # Pfad der gecachten Config
+_config_cache_mtime: float = 0.0   # mtime der Datei beim Lesen
+_config_cache_time: float = 0.0    # Zeitpunkt des letzten Lesens
+_config_cache_lock = threading.Lock()
+_CONFIG_CACHE_TTL = 10.0           # Sekunden — alle programmatischen Änderungen invalidieren sofort
 
 
 def get_config_dir() -> str:
@@ -175,26 +188,82 @@ def config_path(project_dir: str | None = None) -> Path:
 
 
 def load_config(project_dir: str | None = None) -> dict[str, Any]:
+    global _config_cache, _config_cache_path, _config_cache_mtime, _config_cache_time
     path = config_path(project_dir)
-    if not path.exists():
-        return _default_config()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        msg = str(e)
-        if "@" in msg:
-            msg += ' Hinweis: Werte mit "@" (z. B. matrix.user_id) in Anführungszeichen setzen: user_id: "@bot:example.org"'
-        raise RuntimeError(msg) from e
-    merged = _merge_with_defaults(data)
-    # Verzeichnis der geladenen Config (für Matrix-Store etc.); wird nicht in die Datei geschrieben
-    merged["_config_dir"] = str(path.parent.resolve())
-    # Wichtige Verzeichnisse sicherstellen (workspace, agent_dir)
-    for _dir_key in ("workspace", "agent_dir", "trash_dir"):
-        _dir_val = (merged.get(_dir_key) or "").strip()
-        if _dir_val:
-            Path(_dir_val).expanduser().mkdir(parents=True, exist_ok=True)
-    return merged
+    path_str = str(path)
+
+    # --- Cache prüfen (ohne Lock für den häufigen Hit-Pfad) ---
+    now = time.monotonic()
+    if (
+        _config_cache is not None
+        and _config_cache_path == path_str
+        and now - _config_cache_time < _CONFIG_CACHE_TTL
+    ):
+        # Shallow-Copy: Caller dürfen temporäre Keys setzen (z.B. _chat_context)
+        # ohne den Cache dauerhaft zu mutieren.
+        return dict(_config_cache)
+
+    with _config_cache_lock:
+        # Double-check nach Lock-Acquire
+        now = time.monotonic()
+        if (
+            _config_cache is not None
+            and _config_cache_path == path_str
+            and now - _config_cache_time < _CONFIG_CACHE_TTL
+        ):
+            return dict(_config_cache)
+
+        if not path.exists():
+            result = _default_config()
+            _config_cache = result
+            _config_cache_path = path_str
+            _config_cache_mtime = 0.0
+            _config_cache_time = now
+            return dict(result)
+
+        # mtime prüfen: wenn Datei sich nicht geändert hat, Cache verlängern
+        try:
+            current_mtime = path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        if (
+            _config_cache is not None
+            and _config_cache_path == path_str
+            and current_mtime == _config_cache_mtime
+        ):
+            _config_cache_time = now
+            return dict(_config_cache)
+
+        # Datei lesen und parsen
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            msg = str(e)
+            if "@" in msg:
+                msg += ' Hinweis: Werte mit "@" (z. B. matrix.user_id) in Anführungszeichen setzen: user_id: "@bot:example.org"'
+            raise RuntimeError(msg) from e
+        merged = _merge_with_defaults(data)
+        merged["_config_dir"] = str(path.parent.resolve())
+        # Wichtige Verzeichnisse sicherstellen (workspace, agent_dir)
+        for _dir_key in ("workspace", "agent_dir", "trash_dir"):
+            _dir_val = (merged.get(_dir_key) or "").strip()
+            if _dir_val:
+                Path(_dir_val).expanduser().mkdir(parents=True, exist_ok=True)
+
+        _config_cache = merged
+        _config_cache_path = path_str
+        _config_cache_mtime = current_mtime
+        _config_cache_time = now
+        return dict(merged)
+
+
+def invalidate_config_cache() -> None:
+    """Cache sofort invalidieren (nach Config-Speicherung)."""
+    global _config_cache, _config_cache_time
+    with _config_cache_lock:
+        _config_cache = None
+        _config_cache_time = 0.0
 
 
 def load_config_raw(project_dir: str | None = None) -> str:
@@ -243,6 +312,7 @@ def write_config_raw(content: str, project_dir: str | None = None) -> Path:
         except OSError:
             pass
         raise
+    invalidate_config_cache()
     return path
 
 
@@ -644,6 +714,7 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
         with open(path, "w", encoding="utf-8") as f:
             yaml.safe_dump(out, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         path.chmod(0o600)
+    invalidate_config_cache()
     return path
 
 

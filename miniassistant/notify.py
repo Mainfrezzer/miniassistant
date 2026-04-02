@@ -331,13 +331,21 @@ def _send_discord_image(dc: dict[str, Any], image_path: str, caption: str = "", 
         try:
             import uuid as _uuid
             boundary = f"----FormBoundary{_uuid.uuid4().hex[:16]}"
-            body_parts = []
+            header_parts = []
             if caption:
-                body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n{caption}")
-            body_parts.append(
-                f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{p.name}\"\r\nContent-Type: {mime}\r\n\r\n"
+                header_parts.append(
+                    f"--{boundary}\r\n"
+                    f"Content-Disposition: form-data; name=\"content\"\r\n"
+                    f"\r\n"
+                    f"{caption}\r\n"
+                )
+            header_parts.append(
+                f"--{boundary}\r\n"
+                f"Content-Disposition: form-data; name=\"files[0]\"; filename=\"{p.name}\"\r\n"
+                f"Content-Type: {mime}\r\n"
+                f"\r\n"
             )
-            body_bytes = ("\r\n".join(body_parts)).encode("utf-8") + b"\r\n" + img_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            body_bytes = "".join(header_parts).encode("utf-8") + img_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
             send_url = f"https://discord.com/api/v10/channels/{cid}/messages"
             req = urllib.request.Request(
                 send_url, data=body_bytes,

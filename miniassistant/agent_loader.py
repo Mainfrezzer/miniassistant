@@ -235,6 +235,12 @@ def _persistence_section(config: dict[str, Any]) -> str:
             f"write a concise summary to `{prefs_path}/notes-TOPIC.md` (key facts, architecture, tech stack — no full code). "
             f"When asked 'schau dir die Notizen an', read the relevant notes file and use it as context."
         )
+        docs = _docs_dir_path(config)
+        docs_prefix = str(docs) + "/" if docs else "docs/"
+        lines.append(
+            f"**Tracking (calories, expenses, habits, …):** When the user wants to track something over time, "
+            f"read `{docs_prefix}TRACKING.md` first for the exact folder/file structure."
+        )
     trash_dir = (config.get("trash_dir") or "").strip()
     _trash_path = str(Path(trash_dir).expanduser().resolve()) if trash_dir else (f"{workspace_resolved}/.trash" if workspace_resolved else ".trash")
     lines.append(f"Before deleting any file, move it to the app trash: `mv FILE {_trash_path}/` (auto-created, separate from workspace). If user asks to empty the trash: `rm -rf {_trash_path}/*`.")
@@ -317,6 +323,7 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         "| `EMAIL.md` | IMAP/SMTP, multi-account, tracking, auto-reply |\n"
         "| `VOICE.md` | Wyoming STT/TTS, voice setup, send_audio text formatting |\n"
         "| `CHAT_HISTORY.md` | How to find past conversations (date → memory file → summarize) |\n"
+        "| `TRACKING.md` | Long-running tracking (calories, expenses, habits) — folder structure, monthly files |\n"
         "| `PROMPT_ENGINEERING.md` | Writing prompts/rules/instructions for LLMs |\n"
         "| `WEB_FETCHING.md` | read_url JS rendering (Playwright) and proxies |\n"
         "| `API_REFERENCE.md` | REST API endpoints, OpenAI-compatible API |\n"
@@ -446,6 +453,8 @@ def _exec_behavior_section() -> str:
     """Kompakte Verhaltensregeln für exec-Aufrufe: Schritt für Schritt, nicht aufgeben, Research first."""
     rule = _get_rule("exec_behavior.md")
     return (rule + "\n\n") if rule else ""
+
+
 
 
 def _tools_section(config: dict[str, Any]) -> str:

@@ -26,6 +26,7 @@ DOC_FILES = [
     "IMAGE_GENERATION.md",
     "MATRIX.md",
     "PLANNING.md",
+    "PROMPT_ENGINEERING.md",
     "PROVIDERS.md",
     "SCHEDULES.md",
     "SEARCH_ENGINES.md",
@@ -34,6 +35,7 @@ DOC_FILES = [
     "VOICE.md",
     "EMAIL.md",
     "CHAT_HISTORY.md",
+    "TRACKING.md",
     "WEB_FETCHING.md",
     "DIRECTIONS.md",
 ]
