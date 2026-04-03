@@ -765,7 +765,7 @@ def build_system_prompt(
         "(6) **Don't over-ask.** If you have enough information to proceed, just do it. Only ask when essential info is truly missing (e.g. credentials the config doesn't have).",
         "",
         "## Chat history",
-        "Only reference prior messages when the user explicitly refers to them. Do not proactively resume older topics.",
+        "Facts from this conversation (IPs, hosts, paths, preferences) stay valid until corrected. Only avoid resuming *unrelated* old topics.",
         "",
         "## AGENTS (top-level contract)",
         files.get("AGENTS.md", ""),

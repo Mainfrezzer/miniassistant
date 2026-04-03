@@ -158,9 +158,21 @@ def get_voice_language(config: dict[str, Any]) -> str:
 
 
 def get_voice_tts_voice(config: dict[str, Any]) -> str | None:
-    """Piper-Voice-Name aus config.voice.tts_voice (oder voice.tts.voice als Fallback), oder None für Piper-Default."""
+    """Voice-Name aus config.voice.tts_voice (oder voice.tts.voice als Fallback), oder None für Default."""
     voice = config.get("voice") or {}
     return voice.get("tts_voice") or (voice.get("tts") or {}).get("voice") or None
+
+
+def get_voice_tts_model(config: dict[str, Any]) -> str | None:
+    """TTS-Modellname aus config.voice.tts.model (z.B. 'vibevoice', 'kokoro'), oder None für Default."""
+    voice = config.get("voice") or {}
+    return (voice.get("tts") or {}).get("model") or None
+
+
+def get_voice_tts_language(config: dict[str, Any]) -> str | None:
+    """TTS-Sprache aus config.voice.tts.language, Fallback auf voice.language. None wenn nicht gesetzt."""
+    voice = config.get("voice") or {}
+    return (voice.get("tts") or {}).get("language") or voice.get("language") or None
 
 
 def get_voice_tts_options(config: dict[str, Any]) -> dict[str, float]:

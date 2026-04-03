@@ -88,7 +88,23 @@ voice:
   tts_voice: af_bella              # Kokoro voice name (see voices below)
 ```
 
-The TTS backend is auto-detected from the URL scheme: `tcp://` → Piper/Wyoming, `http://` → Kokoro/HTTP-API.
+**With VibeVoice (via LocalAI):**
+```yaml
+voice:
+  stt:
+    url: tcp://localhost:10300      # Wyoming STT server (unchanged)
+  tts:
+    url: http://localhost:8080/tts  # LocalAI TTS endpoint (full path)
+    model: vibevoice               # TTS model name (default: kokoro)
+    voice: Emma                    # VibeVoice speaker: Alice, Frank, Emma, Carter, Davis, Grace, Mike, Samuel
+  language: de                      # Language for STT + TTS (ISO 639-1)
+```
+
+The TTS backend is auto-detected from the URL scheme: `tcp://` → Piper/Wyoming, `http://` → HTTP-API (Kokoro, LocalAI, etc.).
+
+**HTTP TTS URL handling:**
+- URL without path (e.g. `http://host:8880`) → appends `/v1/audio/speech` (OpenAI-compat, for Kokoro)
+- URL with path (e.g. `http://host:8080/tts`) → used as-is (for LocalAI or custom endpoints)
 
 Restart the service after saving. The agent can configure this via `save_config`.
 

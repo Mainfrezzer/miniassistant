@@ -303,15 +303,21 @@ def _send_discord_image(dc: dict[str, Any], image_path: str, caption: str = "", 
                 create_url = "https://discord.com/api/v10/users/@me/channels"
                 create_data = json.dumps({"recipient_id": discord_user_id}).encode()
                 req = urllib.request.Request(
-                    create_url, data=create_data,
-                    headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+                    create_url,
+                    data=create_data,
+                    headers={
+                        "Authorization": f"Bot {bot_token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "miniassistant/1.0",
+                    },
+                    method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     cid = json.loads(resp.read()).get("id")
                 if cid:
                     channels.append(cid)
-            except Exception:
-                continue
+            except Exception as e:
+                logger.warning("Discord DM-Channel fuer %s fehlgeschlagen: %s", discord_user_id, e)
 
     if not channels:
         return "kein Ziel-Channel gefunden"
@@ -330,29 +336,50 @@ def _send_discord_image(dc: dict[str, Any], image_path: str, caption: str = "", 
     for cid in channels:
         try:
             import uuid as _uuid
-            boundary = f"----FormBoundary{_uuid.uuid4().hex[:16]}"
-            header_parts = []
-            if caption:
-                header_parts.append(
+            boundary = f"boundary-{_uuid.uuid4().hex}"
+
+            payload = {
+                "content": caption or "",
+                "attachments": [
+                    {
+                        "id": 0,
+                        "filename": p.name,
+                    }
+                ],
+            }
+
+            parts = []
+            parts.append(
+                (
                     f"--{boundary}\r\n"
-                    f"Content-Disposition: form-data; name=\"content\"\r\n"
-                    f"\r\n"
-                    f"{caption}\r\n"
-                )
-            header_parts.append(
-                f"--{boundary}\r\n"
-                f"Content-Disposition: form-data; name=\"files[0]\"; filename=\"{p.name}\"\r\n"
-                f"Content-Type: {mime}\r\n"
-                f"\r\n"
+                    f'Content-Disposition: form-data; name="payload_json"\r\n'
+                    f"Content-Type: application/json\r\n\r\n"
+                    f"{json.dumps(payload, ensure_ascii=False)}\r\n"
+                ).encode("utf-8")
             )
-            body_bytes = "".join(header_parts).encode("utf-8") + img_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="files[0]"; filename="{p.name}"\r\n'
+                    f"Content-Type: {mime}\r\n\r\n"
+                ).encode("utf-8")
+                + img_bytes
+                + b"\r\n"
+            )
+            parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+            body = b"".join(parts)
+
             send_url = f"https://discord.com/api/v10/channels/{cid}/messages"
             req = urllib.request.Request(
-                send_url, data=body_bytes,
+                send_url,
+                data=body,
                 headers={
                     "Authorization": f"Bot {bot_token}",
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "User-Agent": "miniassistant/1.0",
                 },
+                method="POST",
             )
             urllib.request.urlopen(req, timeout=30)
             sent += 1
@@ -372,7 +399,7 @@ def send_audio(
     """Synthetisiert Text zu Audio via Wyoming TTS und sendet es an Chat-Clients."""
     if config is None:
         config = load_config()
-    from miniassistant.config import get_voice_tts_url, get_voice_tts_voice, get_voice_tts_options
+    from miniassistant.config import get_voice_tts_url, get_voice_tts_voice, get_voice_tts_options, get_voice_tts_model, get_voice_tts_language
     from miniassistant import usage as _usage
     tts_url = get_voice_tts_url(config)
     if not tts_url:
@@ -383,9 +410,11 @@ def send_audio(
         wav_bytes = _wc.synthesize(
             text, tts_url,
             voice=get_voice_tts_voice(config),
+            model=get_voice_tts_model(config),
+            language=get_voice_tts_language(config),
             **get_voice_tts_options(config),
         )
-        _usage.record(config, get_voice_tts_voice(config) or "wyoming", "tts", time.monotonic() - _t0)
+        _usage.record(config, get_voice_tts_voice(config) or get_voice_tts_model(config) or "wyoming", "tts", time.monotonic() - _t0)
     except Exception as e:
         return {"error": f"TTS fehlgeschlagen: {e}"}
 
@@ -463,15 +492,21 @@ def _send_discord_audio(dc: dict[str, Any], wav_bytes: bytes, channel_id: str | 
                 create_url = "https://discord.com/api/v10/users/@me/channels"
                 create_data = json.dumps({"recipient_id": discord_user_id}).encode()
                 req = urllib.request.Request(
-                    create_url, data=create_data,
-                    headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+                    create_url,
+                    data=create_data,
+                    headers={
+                        "Authorization": f"Bot {bot_token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "miniassistant/1.0",
+                    },
+                    method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     cid = json.loads(resp.read()).get("id")
                 if cid:
                     channels.append(cid)
-            except Exception:
-                continue
+            except Exception as e:
+                logger.warning("Discord DM-Channel fuer %s fehlgeschlagen: %s", discord_user_id, e)
 
     if not channels:
         return "kein Ziel-Channel gefunden"
@@ -480,18 +515,50 @@ def _send_discord_audio(dc: dict[str, Any], wav_bytes: bytes, channel_id: str | 
     for cid in channels:
         try:
             import uuid as _uuid
-            boundary = f"----FormBoundary{_uuid.uuid4().hex[:16]}"
-            body_bytes = (
-                f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; "
-                f"filename=\"response.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
-            ).encode("utf-8") + wav_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            boundary = f"boundary-{_uuid.uuid4().hex}"
+
+            payload = {
+                "content": "",
+                "attachments": [
+                    {
+                        "id": 0,
+                        "filename": "response.wav",
+                    }
+                ],
+            }
+
+            parts = []
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="payload_json"\r\n'
+                    f"Content-Type: application/json\r\n\r\n"
+                    f"{json.dumps(payload, ensure_ascii=False)}\r\n"
+                ).encode("utf-8")
+            )
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="files[0]"; filename="response.wav"\r\n'
+                    f"Content-Type: audio/wav\r\n\r\n"
+                ).encode("utf-8")
+                + wav_bytes
+                + b"\r\n"
+            )
+            parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+            body = b"".join(parts)
+
             send_url = f"https://discord.com/api/v10/channels/{cid}/messages"
             req = urllib.request.Request(
-                send_url, data=body_bytes,
+                send_url,
+                data=body,
                 headers={
                     "Authorization": f"Bot {bot_token}",
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "User-Agent": "miniassistant/1.0",
                 },
+                method="POST",
             )
             urllib.request.urlopen(req, timeout=30)
             sent += 1
@@ -531,7 +598,12 @@ def _send_discord(dc: dict[str, Any], message: str, config_dir: str | None = Non
             req = urllib.request.Request(
                 create_url,
                 data=create_data,
-                headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bot {bot_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "miniassistant/1.0",
+                },
+                method="POST",
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 channel_id = json.loads(resp.read()).get("id")
@@ -545,7 +617,12 @@ def _send_discord(dc: dict[str, Any], message: str, config_dir: str | None = Non
             req = urllib.request.Request(
                 send_url,
                 data=body,
-                headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bot {bot_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "miniassistant/1.0",
+                },
+                method="POST",
             )
             urllib.request.urlopen(req, timeout=10)
             sent_to.append(discord_user_id)
@@ -570,7 +647,12 @@ def _send_discord_to_channel(dc: dict[str, Any], message: str, channel_id: str) 
         req = urllib.request.Request(
             send_url,
             data=body,
-            headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bot {bot_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "miniassistant/1.0",
+            },
+            method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
         logger.info("Discord -> Channel %s", channel_id)

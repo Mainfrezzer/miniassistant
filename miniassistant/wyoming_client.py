@@ -139,23 +139,41 @@ def transcribe(audio_bytes: bytes, url: str, language: str = "de") -> str:
     return ""
 
 
-def _synthesize_http(text: str, url: str, voice: str | None = None) -> bytes:
-    """TTS via HTTP OpenAI-kompatibler API (Kokoro-FastAPI o.ä.).
+def _synthesize_http(
+    text: str,
+    url: str,
+    voice: str | None = None,
+    model: str | None = None,
+    language: str | None = None,
+) -> bytes:
+    """TTS via HTTP API (Kokoro-FastAPI, LocalAI/VibeVoice o.ä.).
 
-    Erwartet: POST {url}/v1/audio/speech
-    Body: {"model": "kokoro", "voice": VOICE, "input": TEXT, "response_format": "wav"}
+    URL-Logik:
+      - URL mit Pfad (z.B. http://host:8080/tts) → direkt verwenden
+      - URL ohne Pfad (z.B. http://host:8880)    → /v1/audio/speech anhängen
+    Body: {"model": MODEL, "voice": VOICE, "input": TEXT, "response_format": "wav"}
+    Optional: "language" (z.B. für VibeVoice via LocalAI).
     Antwort: rohe WAV-Bytes.
     """
     import httpx as _httpx
-    endpoint = url.rstrip("/") + "/v1/audio/speech"
-    payload = {
-        "model": "kokoro",
+    from urllib.parse import urlparse as _urlparse
+    _path = _urlparse(url).path.rstrip("/")
+    # URL hat bereits einen spezifischen Pfad (z.B. /tts, /api/v1/tts) → direkt nutzen
+    # Nur reiner Host ohne Pfad (z.B. http://host:8880) → /v1/audio/speech anhängen
+    if _path and _path != "/":
+        endpoint = url.rstrip("/")
+    else:
+        endpoint = url.rstrip("/") + "/v1/audio/speech"
+    payload: dict[str, Any] = {
+        "model": model or "kokoro",
         "input": text,
         "response_format": "wav",
     }
     if voice:
         payload["voice"] = voice
-    _log.info("HTTP TTS: %d Zeichen → %s (voice=%s)", len(text), endpoint, voice or "default")
+    if language:
+        payload["language"] = language
+    _log.info("HTTP TTS: %d Zeichen → %s (model=%s, voice=%s, lang=%s)", len(text), endpoint, payload["model"], voice or "default", language or "-")
     resp = _httpx.post(endpoint, json=payload, timeout=120.0)
     resp.raise_for_status()
     wav = resp.content
@@ -171,18 +189,21 @@ def synthesize(
     noise_w: float | None = None,
     length_scale: float | None = None,
     sentence_silence: float | None = None,
+    model: str | None = None,
+    language: str | None = None,
 ) -> bytes:
     """Synthetisiert Text zu WAV-Audio.
 
     URL-Schema bestimmt das Backend:
-      http:// / https://  → HTTP OpenAI-compat API (Kokoro-FastAPI o.ä.)
+      http:// / https://  → HTTP OpenAI-compat API (Kokoro-FastAPI, LocalAI/VibeVoice o.ä.)
       tcp:// / wyoming:// → Wyoming TCP-Protokoll (Piper)
 
+    HTTP-spezifische Optionen: model, language
     Piper-spezifische Optionen (Wyoming only):
       noise_scale, noise_w, length_scale, sentence_silence
     """
     if url.startswith("http://") or url.startswith("https://"):
-        return _synthesize_http(text, url, voice=voice)
+        return _synthesize_http(text, url, voice=voice, model=model, language=language)
 
     _log.info("Wyoming TTS: %d Zeichen → %s", len(text), url)
     host, port = _parse_url(url)

@@ -84,7 +84,7 @@ def _run_scheduled_job(job_id: str, job_data: str) -> None:
             if cmd_output:
                 full_prompt = f"{full_prompt}\n\nAusgabe des Befehls:\n{cmd_output}"
             logger.info("Job %s prompt (model=%s): %s", job_id[:8], model or "default", prompt[:80])
-            response = _run_prompt(full_prompt, model=model, scheduled_prompt=prompt)
+            response = _run_prompt(full_prompt, model=model, scheduled_prompt=prompt, client=client, room_id=room_id, channel_id=channel_id)
             logger.info("Job %s antwort: %d Zeichen", job_id[:8], len(response))
             if response.strip() == "[WATCH:PENDING]":
                 logger.info("Job %s watch pending — keine Benachrichtigung", job_id[:8])
@@ -125,10 +125,18 @@ def _remove_job_by_id(job_id: str) -> None:
         pass
 
 
-def _run_prompt(prompt: str, model: str | None = None, scheduled_prompt: str | None = None) -> str:
+def _run_prompt(
+    prompt: str,
+    model: str | None = None,
+    scheduled_prompt: str | None = None,
+    client: str | None = None,
+    room_id: str | None = None,
+    channel_id: str | None = None,
+) -> str:
     """Fuehrt einen Prompt durch den Bot (eigene Session) und gibt die Antwort zurueck.
     model: optionaler Modellname/Alias. Wird aufgeloest; bei Fehler Fallback auf Default.
-    scheduled_prompt: Original-Prompt (ohne Prefix) — wird als Guardrail-Kontext fuer Tools gesetzt."""
+    scheduled_prompt: Original-Prompt (ohne Prefix) — wird als Guardrail-Kontext fuer Tools gesetzt.
+    client/room_id/channel_id: Chat-Kontext fuer Tools (send_image, send_audio)."""
     config = load_config()
     from miniassistant.chat_loop import create_session, handle_user_input
     from miniassistant.ollama_client import resolve_model
@@ -138,6 +146,15 @@ def _run_prompt(prompt: str, model: str | None = None, scheduled_prompt: str | N
     # kein User wartet interaktiv. Default 3600s (1h), überschreibbar via schedule_timeout.
     config["api_timeout"] = float(config.get("schedule_timeout") or config.get("api_timeout") or 3600)
     session = create_session(config, None)
+    # Chat-Kontext setzen, damit Tools (send_image, send_audio) den richtigen
+    # Ziel-Raum/Channel kennen und nicht in _pending_images verschwinden.
+    if client and client != "none":
+        chat_context: dict[str, Any] = {"platform": client}
+        if room_id:
+            chat_context["room_id"] = room_id
+        if channel_id:
+            chat_context["channel_id"] = channel_id
+        session["chat_context"] = chat_context
     if model:
         resolved = resolve_model(config, model)
         if resolved:

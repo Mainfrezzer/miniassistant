@@ -614,6 +614,7 @@ def _trim_messages_to_fit(
 _COMPACT_SYSTEM = (
     "Du bist ein Zusammenfassungs-Assistent. Fasse den Chatverlauf kurz und präzise zusammen.\n"
     "Behalte: Fakten, Entscheidungen, offene Aufgaben, User-Präferenzen, wichtige Ergebnisse, Tool-Aufrufe und deren Resultate.\n"
+    "IPs, Hostnamen, Ports, Pfade die der User nannte wörtlich übernehmen.\n"
     "Format: Stichpunkte, max 400 Wörter. Antworte NUR mit der Zusammenfassung, keine Einleitung."
 )
 

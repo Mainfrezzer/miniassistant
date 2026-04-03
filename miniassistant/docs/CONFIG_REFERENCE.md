@@ -115,8 +115,10 @@ voice:
     url: tcp://localhost:10300          # Wyoming STT server (e.g. faster-whisper)
   tts:
     url: tcp://localhost:10200          # Wyoming TTS server (e.g. Piper)
-  language: de                          # STT language hint (default: de)
-  tts_voice: de_DE-thorsten-medium      # Piper voice name (optional)
+    # url: http://localhost:8880        # or HTTP API (Kokoro, LocalAI/VibeVoice)
+    # model: vibevoice                  # TTS model name (optional, default: kokoro)
+  language: de                          # STT + TTS language (default: de)
+  tts_voice: de_DE-thorsten-medium      # Voice name (optional)
 
 avatar: "~/.config/miniassistant/agent/avatar.png"  # Bot profile picture (path or URL)
 
@@ -374,11 +376,17 @@ email:
 Voice enables speech-to-text (STT) and text-to-speech (TTS) for Matrix and Discord.
 Requires: `ffmpeg` system package + running Wyoming STT/TTS servers.
 
+Three TTS backends supported:
+- **Piper** via Wyoming protocol (`tcp://`) — classic, low resource, many voices
+- **Kokoro** via HTTP API (`http://`) — high quality neural TTS, OpenAI-compat API
+- **VibeVoice** via LocalAI (`http://`) — multi-speaker, expressive TTS (model: vibevoice)
+
 **User says "richte Voice ein" or "konfiguriere Sprachausgabe" → ask for:**
 - STT server URL (e.g. `tcp://localhost:10300` for faster-whisper)
-- TTS server URL (e.g. `tcp://localhost:10200` for Piper) — optional, text-only reply if missing
-- Language for STT (default: `de`)
-- Piper voice name — optional (e.g. `de_DE-thorsten-medium`)
+- TTS server URL (e.g. `tcp://localhost:10200` for Piper, `http://localhost:8880` for Kokoro, `http://localhost:8080` for LocalAI) — optional, text-only reply if missing
+- Language (default: `de`) — used for STT and TTS
+- Voice name — optional (e.g. `de_DE-thorsten-medium` for Piper, `af_bella` for Kokoro, `Emma` for VibeVoice)
+- TTS model — optional (only needed for HTTP backends, default: `kokoro`)
 
 **Minimal voice setup (STT only):**
 ```yaml
@@ -388,7 +396,7 @@ voice:
   language: de
 ```
 
-**Full voice setup (STT + TTS):**
+**Full voice setup (STT + TTS with Piper):**
 ```yaml
 voice:
   stt:
@@ -398,6 +406,24 @@ voice:
   language: de
   tts_voice: de_DE-thorsten-medium
 ```
+
+**Full voice setup (STT + TTS with VibeVoice via LocalAI):**
+```yaml
+voice:
+  stt:
+    url: tcp://localhost:10300
+  tts:
+    url: http://localhost:8080
+    model: vibevoice
+  language: de
+  tts_voice: Emma
+```
+
+**Config keys:**
+- `voice.tts.url` — TTS server URL (tcp:// for Wyoming, http:// for HTTP API)
+- `voice.tts.model` — TTS model name (optional, default: `kokoro`, set to `vibevoice` for VibeVoice)
+- `voice.language` — language for STT + TTS (default: `de`)
+- `voice.tts_voice` — voice name (or `voice.tts.voice` as alternative)
 
 **Wyoming server addresses:**
 - `tcp://host:port` — standard form
