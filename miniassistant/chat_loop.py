@@ -4373,4 +4373,50 @@ def run_onboarding_round(
     project_dir: str | None = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, str] | None, dict[str, Any] | None, str, str]:
     """
-    Eine Runde Onboarding-Chat: System-Prompt inkl. erkanntem OS und klaren D
+    Eine Runde Onboarding-Chat: System-Prompt inkl. erkanntem OS und klaren Datei-Beschreibungen, keine Tools.
+    Gibt (response_text, new_messages, suggested_files oder None, debug_info oder None, thinking, content) zurück.
+    """
+    from miniassistant.agent_loader import _detect_system
+    from miniassistant.ollama_client import chat as ollama_chat, resolve_model, get_options_for_model, get_base_url_for_model as _get_base_url
+
+    detected_system = _detect_system()
+    system_prompt = _onboarding_system_prompt(detected_system)
+    model = resolve_model(config, None)
+    if not model:
+        return "Kein Modell konfiguriert (z.B. default in models setzen).", messages, None, None, "", ""
+
+    options = get_options_for_model(config, model)
+    think = get_think_for_model(config, model)
+    debug = (config.get("server") or {}).get("debug", False)
+
+    msgs = list(messages)
+    msgs.append({"role": "user", "content": user_content})
+
+    response = _dispatch_chat(
+        config, model, msgs,
+        system=system_prompt, think=think,
+        tools=[],  # keine Tools beim Onboarding
+        options=options or None,
+    )
+    msg = response.get("message") or {}
+    content = (msg.get("content") or "").strip()
+    thinking = (msg.get("thinking") or "").strip()
+    full = f"[Thinking]\n{thinking}\n\n{content}" if thinking else content
+
+    msgs.append({"role": "assistant", "content": content, "thinking": thinking})
+    suggested = _parse_agent_blocks(content)
+
+    debug_info: dict[str, Any] | None = None
+    if debug:
+        debug_info = {
+            "request": {"model": model, "system": system_prompt, "messages": msgs[:-1]},
+            "response": response,
+            "message": msg,
+        }
+        try:
+            from miniassistant.debug_log import log_chat
+            req = {"model": model, "system": system_prompt, "messages": msgs[:-1], "think": think, "tools": []}
+            log_chat(req, response, config, project_dir, label="onboarding")
+        except Exception:
+            pass
+    return full, msgs, suggested, debug_info, thinking, content
