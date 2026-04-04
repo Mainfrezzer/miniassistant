@@ -238,12 +238,15 @@ def run_exec(command: str, timeout: int = 60, cwd: str | None = None, extra_env:
         }
 
 
-def web_search(searxng_url: str, query: str, max_results: int = 5) -> dict[str, Any]:
-    """SearXNG JSON-API: ?q=...&format=json. Gibt Titel, URL, Snippet zurück."""
+def web_search(searxng_url: str, query: str, max_results: int = 5, categories: str | None = None) -> dict[str, Any]:
+    """SearXNG JSON-API: ?q=...&format=json. Gibt Titel, URL, Snippet zurück.
+    categories: Optional SearXNG category (e.g. 'images', 'videos', 'news')."""
     url = searxng_url.rstrip("/")
     if "/search" not in url and not url.endswith("/search"):
         url = f"{url}/search"
-    params = {"q": query, "format": "json"}
+    params: dict[str, str] = {"q": query, "format": "json"}
+    if categories:
+        params["categories"] = categories
     last_err: Exception | None = None
     for attempt in range(_RETRY_ATTEMPTS):
         try:
@@ -273,11 +276,14 @@ def web_search(searxng_url: str, query: str, max_results: int = 5) -> dict[str, 
     results = data.get("results") or []
     out = []
     for hit in results[:max_results]:
-        out.append({
+        entry: dict[str, str] = {
             "title": hit.get("title", ""),
             "url": hit.get("url", ""),
             "snippet": hit.get("content", "")[:300],
-        })
+        }
+        if hit.get("img_src"):
+            entry["img_src"] = hit["img_src"]
+        out.append(entry)
     return {"results": out}
 
 

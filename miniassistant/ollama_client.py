@@ -388,6 +388,7 @@ def _tools_schema(
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
                         "engine": {"type": "string", "description": "Optional. Engine id (e.g. main, vpn). Omit to use default."},
+                        "categories": {"type": "string", "description": "Optional. SearXNG category: 'images', 'videos', 'news', 'music', 'files'. Use 'images' to find pictures — results include img_src (direct image URL) which you can download with exec (wget/curl) and send via send_image."},
                     },
                     "required": ["query"],
                 },
@@ -670,6 +671,7 @@ def get_subagent_tools_schema(config: dict[str, Any]) -> list[dict[str, Any]]:
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
                         "engine": {"type": "string", "description": "Optional engine id."},
+                        "categories": {"type": "string", "description": "Optional. SearXNG category: 'images', 'videos', 'news', 'music', 'files'. Use 'images' to find pictures — results include img_src (direct image URL)."},
                     },
                     "required": ["query"],
                 },

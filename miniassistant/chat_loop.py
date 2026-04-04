@@ -1268,14 +1268,20 @@ def _run_tool(
         return f"returncode: {result['returncode']}\nstdout:\n{result['stdout']}\nstderr:\n{result['stderr']}"
     if name == "web_search":
         query = arguments.get("query", "")
+        _categories = arguments.get("categories")
         from miniassistant.config import get_search_engine_for_request
         url, _used_eid = get_search_engine_for_request(config, arguments.get("engine"))
         if not url:
             return "web_search not configured (no search_engines or invalid engine)"
-        result = tool_web_search(url, query)
+        result = tool_web_search(url, query, categories=_categories)
         if result.get("error"):
             return f"Error: {result['error']}"
-        lines = [f"- {r.get('title', '')} | {r.get('url', '')}\n  {r.get('snippet', '')}" for r in result.get("results") or []]
+        lines = []
+        for r in result.get("results") or []:
+            line = f"- {r.get('title', '')} | {r.get('url', '')}\n  {r.get('snippet', '')}"
+            if r.get("img_src"):
+                line += f"\n  img_src: {r['img_src']}"
+            lines.append(line)
         if not lines:
             strategy = (config.get("search_engine_strategy") or "first").strip().lower()
             if strategy != "specific":
@@ -1287,9 +1293,14 @@ def _run_tool(
                     next_engine = others[0]
                     next_url = (config.get("search_engines") or {}).get(next_engine, {}).get("url", "")
                     if next_url:
-                        alt_result = tool_web_search(next_url, query)
+                        alt_result = tool_web_search(next_url, query, categories=_categories)
                         if alt_result.get("results"):
-                            alt_lines = [f"- {r.get('title', '')} | {r.get('url', '')}\n  {r.get('snippet', '')}" for r in alt_result["results"]]
+                            alt_lines = []
+                            for r in alt_result["results"]:
+                                _al = f"- {r.get('title', '')} | {r.get('url', '')}\n  {r.get('snippet', '')}"
+                                if r.get("img_src"):
+                                    _al += f"\n  img_src: {r['img_src']}"
+                                alt_lines.append(_al)
                             return f"[No results from '{url}', results from '{next_engine}':]\n" + "\n".join(alt_lines)
             return "Search engine returned no results. This is a search engine failure — do NOT conclude that nothing exists. Tell the user the search returned no results and suggest rephrasing."
         return "\n".join(lines)
@@ -2227,11 +2238,16 @@ def _run_subagent_anthropic(
                 if not _ws_url:
                     tool_result = "web_search not configured"
                 else:
-                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""))
+                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""), categories=tc_args.get("categories"))
                     if _ws_res.get("error"):
                         tool_result = f"Error: {_ws_res['error']}"
                     else:
-                        _ws_lines = [f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}" for _r in _ws_res.get("results") or []]
+                        _ws_lines = []
+                        for _r in _ws_res.get("results") or []:
+                            _wl = f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}"
+                            if _r.get("img_src"):
+                                _wl += f"\n  img_src: {_r['img_src']}"
+                            _ws_lines.append(_wl)
                         tool_result = "\n".join(_ws_lines) if _ws_lines else "Search engine returned no results. This is a search engine failure — do NOT conclude that nothing exists. Tell the user the search returned no results and suggest rephrasing."
             elif tc_name == "check_url":
                 _cu_r = tool_check_url(tc_args.get("url", ""))
@@ -2326,11 +2342,16 @@ def _run_subagent_google(
                 if not _ws_url:
                     tool_result = "web_search not configured"
                 else:
-                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""))
+                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""), categories=tc_args.get("categories"))
                     if _ws_res.get("error"):
                         tool_result = f"Error: {_ws_res['error']}"
                     else:
-                        _ws_lines = [f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}" for _r in _ws_res.get("results") or []]
+                        _ws_lines = []
+                        for _r in _ws_res.get("results") or []:
+                            _wl = f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}"
+                            if _r.get("img_src"):
+                                _wl += f"\n  img_src: {_r['img_src']}"
+                            _ws_lines.append(_wl)
                         tool_result = "\n".join(_ws_lines) if _ws_lines else "Search engine returned no results. This is a search engine failure — do NOT conclude that nothing exists. Tell the user the search returned no results and suggest rephrasing."
             elif tc_name == "check_url":
                 _cu_r = tool_check_url(tc_args.get("url", ""))
@@ -2528,11 +2549,16 @@ def _run_subagent_openai(
                 if not _ws_url:
                     tool_result = "web_search not configured"
                 else:
-                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""))
+                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""), categories=tc_args.get("categories"))
                     if _ws_res.get("error"):
                         tool_result = f"Error: {_ws_res['error']}"
                     else:
-                        _ws_lines = [f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}" for _r in _ws_res.get("results") or []]
+                        _ws_lines = []
+                        for _r in _ws_res.get("results") or []:
+                            _wl = f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}"
+                            if _r.get("img_src"):
+                                _wl += f"\n  img_src: {_r['img_src']}"
+                            _ws_lines.append(_wl)
                         tool_result = "\n".join(_ws_lines) if _ws_lines else "Search engine returned no results. This is a search engine failure — do NOT conclude that nothing exists. Tell the user the search returned no results and suggest rephrasing."
             elif tc_name == "check_url":
                 _cu_r = tool_check_url(tc_args.get("url", ""))
@@ -2643,13 +2669,16 @@ def _run_subagent_with_tools(
                 if not _ws_url:
                     tool_result = "web_search not configured (no search_engines or invalid engine)"
                 else:
-                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""))
+                    _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""), categories=tc_args.get("categories"))
                     if _ws_res.get("error"):
                         tool_result = f"Error: {_ws_res['error']}"
                     else:
                         _ws_lines = []
                         for _r in _ws_res.get("results") or []:
-                            _ws_lines.append(f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}")
+                            _wl = f"- {_r.get('title', '')} | {_r.get('url', '')}\n  {_r.get('snippet', '')}"
+                            if _r.get("img_src"):
+                                _wl += f"\n  img_src: {_r['img_src']}"
+                            _ws_lines.append(_wl)
                         tool_result = "\n".join(_ws_lines) if _ws_lines else "Search engine returned no results. This is a search engine failure — do NOT conclude that nothing exists. Tell the user the search returned no results and suggest rephrasing."
             elif tc_name == "check_url":
                 _cu_r = tool_check_url(tc_args.get("url", ""))
@@ -2697,8 +2726,17 @@ def _run_subagent_with_tools(
                         elif tc_name == "web_search":
                             from miniassistant.config import get_search_engine_url
                             _ws_url = get_search_engine_url(config, tc_args.get("engine"))
-                            _ws_res = tool_web_search(_ws_url, tc_args.get("query", "")) if _ws_url else {"error": "not configured"}
-                            tool_result = "\n".join(f"- {_r.get('title','')} | {_r.get('url','')}\n  {_r.get('snippet','')}" for _r in (_ws_res.get("results") or [])) if not _ws_res.get("error") else f"Error: {_ws_res.get('error')}"
+                            _ws_res = tool_web_search(_ws_url, tc_args.get("query", ""), categories=tc_args.get("categories")) if _ws_url else {"error": "not configured"}
+                            if not _ws_res.get("error"):
+                                _nws_lines = []
+                                for _r in (_ws_res.get("results") or []):
+                                    _nwl = f"- {_r.get('title','')} | {_r.get('url','')}\n  {_r.get('snippet','')}"
+                                    if _r.get("img_src"):
+                                        _nwl += f"\n  img_src: {_r['img_src']}"
+                                    _nws_lines.append(_nwl)
+                                tool_result = "\n".join(_nws_lines)
+                            else:
+                                tool_result = f"Error: {_ws_res.get('error')}"
                         elif tc_name == "read_url":
                             _ru_r = tool_read_url(tc_args.get("url", ""), config=config, proxy=tc_args.get("proxy"), js=bool(tc_args.get("js", False)))
                             tool_result = _ru_r.get("content", "") if _ru_r.get("ok") else f"Error: {_ru_r.get('error', 'unknown')}"
