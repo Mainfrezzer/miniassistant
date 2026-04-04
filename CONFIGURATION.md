@@ -435,7 +435,7 @@ Chat-Clients werden unter `chat_clients:` konfiguriert. Momentan unterstuetzt: *
 
 **Nachrichten-Formatierung:** Discord unterstuetzt nativ Markdown - keine Konvertierung noetig.
 
-**Befehle:** `/model MODELLNAME` und `/models` funktionieren in Matrix und Discord. **`/new`** (neue Session, Verlauf leeren, Memory bleibt im Prompt) wirkt nur in **Web-UI und CLI** – in Matrix und Discord wird `/new` ignoriert (keine Antwort), da dort pro Nutzer ohnehin eine Session läuft.
+**Befehle:** `/model MODELLNAME` und `/models` funktionieren in Matrix und Discord. **`/new`** (neue Session, Verlauf leeren, Memory bleibt im Prompt) wirkt nur in **Web-UI und CLI** – in Matrix und Discord wird `/new` ignoriert (keine Antwort), da dort pro Nutzer ohnehin eine Session läuft. **Alle Befehle können auch mit `:` statt `/` eingegeben werden** (z.B. `:new`, `:model NAME`), was besonders auf Matrix-Mobile nützlich ist, da dort `/`-Befehle vom Client abgefangen werden.
 
 ### Auth-Flow (Matrix + Discord)
 

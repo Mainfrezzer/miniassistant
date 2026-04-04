@@ -330,7 +330,7 @@ def chat(ctx: click.Context, model: str | None, show_thinking: bool) -> None:
     session = create_session(config, project_dir)
     if model:
         session["model"] = resolve_model(config, model) or model
-    console.print("[bold]MiniAssistant[/bold] – Chat. /model = aktuelles Modell, /model NAME = Wechsel, /models = Modellliste, /new = neue Session, [cyan]exit[/cyan] = Beenden.\n")
+    console.print("[bold]MiniAssistant[/bold] – Chat. /model = aktuelles Modell, /model NAME = Wechsel, /models = Modellliste, /new = neue Session, [cyan]exit[/cyan] = Beenden. (: statt / geht auch)\n")
     current_model = session.get("model")
     console.print("Aktuelles Modell:", current_model or "(keins)")
 
@@ -362,8 +362,9 @@ def chat(ctx: click.Context, model: str | None, show_thinking: bool) -> None:
         _tps_raw = None
         _ctx_raw = None
 
-        if user_input.strip().startswith("/"):
-            # Befehle (/model, /new, …): synchroner Pfad
+        _stripped = user_input.strip()
+        if _stripped.startswith("/") or (_stripped.startswith(":") and len(_stripped) > 1 and not _stripped[1:2].isspace()):
+            # Befehle (/model, /new, :model, :new …): synchroner Pfad
             with console.status("[dim]…[/dim]", spinner="dots"):
                 result = handle_user_input(session, user_input)
             _elapsed = time.monotonic() - _t0

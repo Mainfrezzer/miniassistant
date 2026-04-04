@@ -140,7 +140,28 @@ def _clean_response(content: str, thinking: str) -> tuple[str, str]:
         thinking = (thinking + "\n" + extra).strip() if thinking else extra
     content = _strip_tool_call_tags(content)
     thinking = _strip_tool_call_tags(thinking)
+    content = _strip_hallucinated_base64(content)
     return content, thinking
+
+
+_BASE64_IMG_RE = _re.compile(r'!\[[^\]]*\]\(data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)')
+_NAKED_BASE64_RE = _re.compile(r'data:image/[^;]+;base64,[A-Za-z0-9+/=\s]{100,}')
+
+
+def _has_hallucinated_base64(content: str) -> bool:
+    """True wenn der Content halluzinierte base64-Bilddaten enthält."""
+    if "base64," not in content:
+        return False
+    return bool(_BASE64_IMG_RE.search(content) or _NAKED_BASE64_RE.search(content))
+
+
+def _strip_hallucinated_base64(content: str) -> str:
+    """Entfernt halluzinierte data:image/…;base64-Blöcke aus dem Content."""
+    if "base64," not in content:
+        return content
+    cleaned = _BASE64_IMG_RE.sub("", content)
+    cleaned = _NAKED_BASE64_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _strip_tool_call_tags(content: str) -> str:
@@ -774,14 +795,15 @@ def _format_help() -> str:
         "**Befehle:**\n\n"
         "| Befehl | Beschreibung |\n"
         "|--------|-------------|\n"
-        "| `/model` | Aktuelles Modell anzeigen |\n"
-        "| `/model NAME` | Modell wechseln |\n"
-        "| `/models` | Alle Modelle anzeigen |\n"
-        "| `/new` · `/neu` | Neue Session / Verlauf löschen |\n"
-        "| `/schedules` · `/aufgaben` | Geplante Jobs anzeigen |\n"
-        "| `/schedule remove ID` · `/aufgabe entfernen ID` | Job löschen |\n"
-        "| `/auth CODE` | Web-UI freischalten |\n"
-        "| `/help` · `/hilfe` | Diese Hilfe |"
+        "| `/model` · `:model` | Aktuelles Modell anzeigen |\n"
+        "| `/model NAME` · `:model NAME` | Modell wechseln |\n"
+        "| `/models` · `:models` | Alle Modelle anzeigen |\n"
+        "| `/new` · `/neu` · `:new` · `:neu` | Neue Session / Verlauf löschen |\n"
+        "| `/schedules` · `:schedules` | Geplante Jobs anzeigen |\n"
+        "| `/schedule remove ID` · `:schedule remove ID` | Job löschen |\n"
+        "| `/auth CODE` · `:auth CODE` | Web-UI freischalten |\n"
+        "| `/help` · `/hilfe` · `:help` | Diese Hilfe |\n"
+        "\n*Tipp: Auf Matrix-Mobile `:` statt `/` verwenden.*"
     )
 
 
@@ -822,7 +844,7 @@ def parse_model_switch(user_input: str) -> tuple[str | None, str]:
     Erkennt /model MODELLNAME oder /model ALIAS. Gibt (modellname, rest) zurück.
     Wenn kein Wechsel: (None, user_input).
     """
-    raw = user_input.strip()
+    raw = _normalize_cmd(user_input.strip())
     if raw.startswith("/model ") and len(raw) > 7:
         rest = raw[7:].strip()
         if rest:
@@ -838,7 +860,7 @@ def parse_models_command(user_input: str) -> tuple[bool, str | None]:
     Erkennt /models oder /models PROVIDER. Gibt (True, provider) zurück bei Treffer;
     provider=None bedeutet alle Anbieter, sonst z.B. 'ollama'. Bei keinem Treffer (False, None).
     """
-    raw = user_input.strip()
+    raw = _normalize_cmd(user_input.strip())
     if raw == "/models":
         return True, None
     if raw.startswith("/models ") and len(raw) > 8:
@@ -3174,6 +3196,17 @@ def chat_round(
                     _display_content = _strip_tool_call_tags(_msg_content)
 
                 if not tool_calls:
+                    # base64-Bild halluziniert? → strippen, Korrektur-Runde starten
+                    if _has_hallucinated_base64(_msg_content) and rounds < max_tool_rounds:
+                        _log.info("Halluziniertes base64-Bild erkannt — sende Korrektur-Nudge (Runde %d)", rounds)
+                        _stripped = _strip_hallucinated_base64(_msg_content)
+                        msgs.append({"role": "assistant", "content": _stripped or "(base64-Bild entfernt)", "thinking": msg.get("thinking") or ""})
+                        msgs.append({"role": "user", "content":
+                            "STOP. Du hast base64-Bilddaten in deiner Antwort ausgegeben. Das funktioniert NICHT — base64-Text ist kein echtes Bild. "
+                            "Nutze JETZT deine Tools: invoke_model um das Bild zu generieren, dann send_image um es zu senden."
+                        })
+                        rounds += 1
+                        continue
                     total_content += _display_content  # Nur finale Runde akkumulieren
                     msgs.append({"role": "assistant", "content": _msg_content or "", "thinking": msg.get("thinking") or ""})
                     _aal.log_thinking(config, msg.get("thinking") or "")
@@ -3387,6 +3420,9 @@ def chat_round(
                 _m["content"] = _mc
                 if _mt and not _m.get("thinking"):
                     _m["thinking"] = _mt
+                # Halluzinierte base64-Bilder entfernen (fressen Kontext)
+                if "base64," in _m["content"]:
+                    _m["content"] = _strip_hallucinated_base64(_m["content"])
     return _final_content, _final_thinking, msgs_final, debug_info, switch_info
 
 
@@ -3667,11 +3703,26 @@ def chat_round_stream(
             continue
 
         if not tool_calls:
-            # Content/Thinking aus den gestreamten Deltas verwenden (Done-Chunk hat oft leere Werte)
-            msgs.append({"role": "assistant", "content": round_content or full_msg.get("content") or "", "thinking": round_thinking or full_msg.get("thinking") or ""})
-            _aal.log_thinking(config, round_thinking or full_msg.get("thinking") or "")
             _rc = round_content or full_msg.get("content") or ""
             _rt = round_thinking or full_msg.get("thinking") or ""
+
+            # base64-Bild halluziniert? → strippen, Korrektur-Runde starten
+            if _has_hallucinated_base64(_rc) and rounds < max_rounds:
+                _log.info("Halluziniertes base64-Bild im Stream erkannt — sende Korrektur-Nudge (Runde %d)", rounds)
+                if _rc in total_content:
+                    total_content = total_content.replace(_rc, "")
+                _stripped = _strip_hallucinated_base64(_rc)
+                msgs.append({"role": "assistant", "content": _stripped or "(base64-Bild entfernt)", "thinking": _rt})
+                msgs.append({"role": "user", "content":
+                    "STOP. Du hast base64-Bilddaten in deiner Antwort ausgegeben. Das funktioniert NICHT — base64-Text ist kein echtes Bild. "
+                    "Nutze JETZT deine Tools: invoke_model um das Bild zu generieren, dann send_image um es zu senden."
+                })
+                rounds += 1
+                continue
+
+            # Content/Thinking aus den gestreamten Deltas verwenden (Done-Chunk hat oft leere Werte)
+            msgs.append({"role": "assistant", "content": _rc, "thinking": _rt})
+            _aal.log_thinking(config, _rt)
             _aal.log_response(config, _rc, tps=_aal.extract_tps(last_response, time.monotonic() - _t0_stream, _rc, _rt))
 
             # Stuck-Prevention: wenn kein Content, Nudge senden
@@ -3947,13 +3998,25 @@ def chat_round_stream(
         _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
         _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
 
+    # Halluzinierte base64-Bilder aus Messages entfernen (fressen Kontext)
+    for _m in msgs:
+        if _m.get("role") == "assistant" and _m.get("content") and "base64," in _m["content"]:
+            _m["content"] = _strip_hallucinated_base64(_m["content"])
+
     _final_tps = _aal.extract_tps(last_response, time.monotonic() - _t0_stream, _final_content, _final_thinking)
     yield {"type": "done", "thinking": _final_thinking, "content": _final_content, "images": _pending_imgs, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _final_tps, "ctx": [_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs), _ctx_max]}
 
 
+def _normalize_cmd(raw: str) -> str:
+    """Normalisiert :befehl → /befehl, damit Befehle auch mit Doppelpunkt funktionieren (z.B. auf Matrix-Mobile)."""
+    if raw.startswith(":") and len(raw) > 1 and not raw[1:2].isspace():
+        return "/" + raw[1:]
+    return raw
+
+
 def is_chat_command(user_input: str) -> bool:
     """True wenn die Eingabe ein Befehl ist (/model, /models, /auth, /new usw.), der ohne Stream behandelt wird."""
-    raw = (user_input or "").strip()
+    raw = _normalize_cmd((user_input or "").strip())
     if not raw:
         return True
     lower = raw.lower()
@@ -4003,6 +4066,8 @@ def handle_user_input(
     Gibt (Antwort-Text, Session, debug_info, thinking, content, switch_info) zurück.
     allow_new_session: Wenn False (z. B. Matrix/Discord), wird /new ignoriert und nur Hinweis zurückgegeben.
     """
+    # :befehl → /befehl normalisieren (Matrix-Mobile unterstützt kein /)
+    user_input = _normalize_cmd(user_input.strip()) if user_input else user_input
     config = session["config"]
     project_dir = session.get("project_dir")
 
@@ -4308,50 +4373,4 @@ def run_onboarding_round(
     project_dir: str | None = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, str] | None, dict[str, Any] | None, str, str]:
     """
-    Eine Runde Onboarding-Chat: System-Prompt inkl. erkanntem OS und klaren Datei-Beschreibungen, keine Tools.
-    Gibt (response_text, new_messages, suggested_files oder None, debug_info oder None, thinking, content) zurück.
-    """
-    from miniassistant.agent_loader import _detect_system
-    from miniassistant.ollama_client import chat as ollama_chat, resolve_model, get_options_for_model, get_base_url_for_model as _get_base_url
-
-    detected_system = _detect_system()
-    system_prompt = _onboarding_system_prompt(detected_system)
-    model = resolve_model(config, None)
-    if not model:
-        return "Kein Modell konfiguriert (z.B. default in models setzen).", messages, None, None, "", ""
-
-    options = get_options_for_model(config, model)
-    think = get_think_for_model(config, model)
-    debug = (config.get("server") or {}).get("debug", False)
-
-    msgs = list(messages)
-    msgs.append({"role": "user", "content": user_content})
-
-    response = _dispatch_chat(
-        config, model, msgs,
-        system=system_prompt, think=think,
-        tools=[],  # keine Tools beim Onboarding
-        options=options or None,
-    )
-    msg = response.get("message") or {}
-    content = (msg.get("content") or "").strip()
-    thinking = (msg.get("thinking") or "").strip()
-    full = f"[Thinking]\n{thinking}\n\n{content}" if thinking else content
-
-    msgs.append({"role": "assistant", "content": content, "thinking": thinking})
-    suggested = _parse_agent_blocks(content)
-
-    debug_info: dict[str, Any] | None = None
-    if debug:
-        debug_info = {
-            "request": {"model": model, "system": system_prompt, "messages": msgs[:-1]},
-            "response": response,
-            "message": msg,
-        }
-        try:
-            from miniassistant.debug_log import log_chat
-            req = {"model": model, "system": system_prompt, "messages": msgs[:-1], "think": think, "tools": []}
-            log_chat(req, response, config, project_dir, label="onboarding")
-        except Exception:
-            pass
-    return full, msgs, suggested, debug_info, thinking, content
+    Eine Runde Onboarding-Chat: System-Prompt inkl. erkanntem OS und klaren D

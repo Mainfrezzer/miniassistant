@@ -30,6 +30,10 @@ If the list is empty: tell the user "Kein Bildgenerierungs-Modell konfiguriert. 
 
 **No curl commands needed.** The `send_image` tool handles credentials, room/channel detection, and upload automatically.
 
+## CRITICAL — NEVER generate fake images
+
+**NEVER** output `![...](data:image/png;base64,...)` or any base64-encoded image data in your response text. You CANNOT generate images by writing base64 — that produces garbage data, not a real image. **ALWAYS** use `invoke_model` with a configured image generation model, then `send_image` to deliver it. There is no shortcut.
+
 ## Always available
 
 Image generation is **always available** when configured — no per-provider activation needed.

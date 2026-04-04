@@ -831,10 +831,10 @@ func runChat(cfg Config, preload *Session) {
 		}
 	}
 	fmt.Printf("\n%sBefehle:%s\n", dim, reset)
-	fmt.Printf("%s  /model          Aktuelles Modell anzeigen%s\n", dim, reset)
-	fmt.Printf("%s  /model NAME     Modell wechseln%s\n", dim, reset)
-	fmt.Printf("%s  /models         Alle Modelle auflisten%s\n", dim, reset)
-	fmt.Printf("%s  /new            Neue Session starten%s\n", dim, reset)
+	fmt.Printf("%s  /model  :model  Aktuelles Modell anzeigen%s\n", dim, reset)
+	fmt.Printf("%s  /model  :model  NAME  Modell wechseln%s\n", dim, reset)
+	fmt.Printf("%s  /models :models Alle Modelle auflisten%s\n", dim, reset)
+	fmt.Printf("%s  /new    :new    Neue Session starten%s\n", dim, reset)
 	fmt.Printf("%s  exit            Beenden%s\n\n", dim, reset)
 
 	client := &http.Client{Timeout: 0} // kein globaler Timeout — Stream kann lange laufen
@@ -868,6 +868,11 @@ func runChat(cfg Config, preload *Session) {
 		}
 		if input == "exit" || input == "quit" || input == "q" {
 			break
+		}
+
+		// :befehl → /befehl normalisieren (Matrix-Mobile kann kein /)
+		if strings.HasPrefix(input, ":") && len(input) > 1 && input[1] != ' ' {
+			input = "/" + input[1:]
 		}
 
 		// Slash-Commands verarbeiten

@@ -983,7 +983,7 @@ async def chat_page(request: Request):
       <img src="/static/miniassistant.png" alt="MiniAssistant">
       <h1>Chat</h1>
       <span id="track-badge" style="display:none;font-size:0.72em;background:var(--primary);color:#fff;padding:0.15em 0.5em;border-radius:10px;margin-left:0.2em">💾 wird gespeichert</span>
-      <span class="cmds">/model, /models, /new, /schedules, /schedule remove &lt;ID&gt;, /auth</span>
+      <span class="cmds">/model, /models, /new, /schedules, /schedule remove &lt;ID&gt;, /auth — oder mit : statt /</span>
     </div>
     {"<div class=\"onboarding-notice\">Setup noch nicht abgeschlossen. <a href=\"/onboarding" + token_q + "\">Onboarding / Setup</a></div>" if show_onboarding else ""}
     <div id="log"></div>
@@ -1862,8 +1862,11 @@ async def api_chat_stream(request: Request):
             _chat_images = None
 
     if is_chat_command(message) or body.get("model"):
-        is_new = message.strip().lower() == "/new"
-        is_model_switch = message.strip().lower().startswith("/model ") or body.get("model")
+        _msg_lower = message.strip().lower()
+        if _msg_lower.startswith(":") and len(_msg_lower) > 1 and not _msg_lower[1:2].isspace():
+            _msg_lower = "/" + _msg_lower[1:]
+        is_new = _msg_lower == "/new"
+        is_model_switch = _msg_lower.startswith("/model ") or body.get("model")
         # Run in threadpool to avoid blocking event loop during model pulls
         loop = asyncio.get_event_loop()
         executor = _chat_executor
