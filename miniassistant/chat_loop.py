@@ -1753,6 +1753,25 @@ def _run_tool(
         sub_msg = arguments.get("message", "").strip()
         if not sub_model or not sub_msg:
             return "invoke_model requires 'model' and 'message'"
+        # Image generation parameters (optional, passed through to backend)
+        _img_params: dict[str, Any] = {}
+        _img_size = arguments.get("size", "").strip() if isinstance(arguments.get("size"), str) else ""
+        if _img_size:
+            _img_params["size"] = _img_size
+        for _pk in ("steps", "seed"):
+            if arguments.get(_pk) is not None:
+                _img_params[_pk] = int(arguments[_pk])
+        for _pk in ("cfg_scale", "guidance"):
+            if arguments.get(_pk) is not None:
+                _img_params[_pk] = float(arguments[_pk])
+        for _pk in ("negative_prompt", "sampler", "scheduler"):
+            _pv = arguments.get(_pk, "").strip() if isinstance(arguments.get(_pk), str) else ""
+            if _pv:
+                _img_params[_pk] = _pv
+        if _img_params:
+            config["_img_gen_params"] = _img_params
+        else:
+            config.pop("_img_gen_params", None)
         resolved = resolve_model(config, sub_model) or sub_model
         provider_type = get_provider_type(config, resolved)
         _, api_model_sub = get_provider_config(config, resolved)
@@ -2493,17 +2512,31 @@ def _run_subagent_openai(
             from pathlib import Path as _Path
             import time as _time
             import re as _img_re
-            # Parameter aus User-Prompt extrahieren (Size, Steps, Quality, CFG)
+            # Parameter: explizite Tool-Parameter haben Vorrang, Regex-Fallback aus Prompt
+            _explicit = config.get("_img_gen_params") or {}
             _img_kwargs: dict[str, Any] = {}
-            _size_m = _img_re.search(r'(\d{3,4})\s*[xX×]\s*(\d{3,4})', user_msg)
-            if _size_m:
-                _img_kwargs["size"] = f"{_size_m.group(1)}x{_size_m.group(2)}"
-            _steps_m = _img_re.search(r'(\d+)\s*(?:steps?|schritte?)\b', user_msg, _img_re.IGNORECASE)
-            if _steps_m:
-                _img_kwargs["steps"] = int(_steps_m.group(1))
-            _cfg_m = _img_re.search(r'(?:cfg[_ ]?(?:scale)?|guidance)\s*[:=]?\s*(\d+(?:\.\d+)?)', user_msg, _img_re.IGNORECASE)
-            if _cfg_m:
-                _img_kwargs["cfg_scale"] = float(_cfg_m.group(1))
+            if _explicit.get("size"):
+                _img_kwargs["size"] = _explicit["size"]
+            else:
+                _size_m = _img_re.search(r'(\d{3,4})\s*[xX×]\s*(\d{3,4})', user_msg)
+                if _size_m:
+                    _img_kwargs["size"] = f"{_size_m.group(1)}x{_size_m.group(2)}"
+            if _explicit.get("steps") is not None:
+                _img_kwargs["steps"] = _explicit["steps"]
+            else:
+                _steps_m = _img_re.search(r'(\d+)\s*(?:steps?|schritte?)\b', user_msg, _img_re.IGNORECASE)
+                if _steps_m:
+                    _img_kwargs["steps"] = int(_steps_m.group(1))
+            if _explicit.get("cfg_scale") is not None:
+                _img_kwargs["cfg_scale"] = _explicit["cfg_scale"]
+            else:
+                _cfg_m = _img_re.search(r'(?:cfg[_ ]?(?:scale)?|guidance)\s*[:=]?\s*(\d+(?:\.\d+)?)', user_msg, _img_re.IGNORECASE)
+                if _cfg_m:
+                    _img_kwargs["cfg_scale"] = float(_cfg_m.group(1))
+            # Weitere Parameter direkt durchreichen (kein Regex-Fallback nötig)
+            for _ek in ("guidance", "seed", "negative_prompt", "sampler", "scheduler"):
+                if _explicit.get(_ek) is not None:
+                    _img_kwargs[_ek] = _explicit[_ek]
             _quality_m = _img_re.search(r'\b(hd|high|hq|standard|low)\b', user_msg, _img_re.IGNORECASE)
             if _quality_m:
                 _q = _quality_m.group(1).lower()

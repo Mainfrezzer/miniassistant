@@ -594,12 +594,20 @@ def _tools_schema(
             "type": "function",
             "function": {
                 "name": "invoke_model",
-                "description": "Delegate a task to another model (subagent) by name or alias. Use e.g. for compiling (qwen-coder), code review, or specialized tasks. Returns the other model's reply.",
+                "description": "Delegate a task to another model (subagent) by name or alias. Use e.g. for compiling (qwen-coder), code review, or specialized tasks. Returns the other model's reply. For image generation models: pass the image prompt as message, and use the optional size/steps/cfg_scale parameters to control generation.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "model": {"type": "string", "description": "Model name or alias (e.g. qwen2.5-coder:14b or alias 'compiler')"},
-                        "message": {"type": "string", "description": "Task or question to delegate (e.g. 'Review this code: ...'). Pass the task itself — NEVER a pre-written answer."},
+                        "message": {"type": "string", "description": "Task or question to delegate (e.g. 'Review this code: ...'). Pass the task itself — NEVER a pre-written answer. For image generation: the image prompt."},
+                        "size": {"type": "string", "description": "Image size for image generation models (e.g. '512x512', '1024x1024'). Default: 1024x1024."},
+                        "steps": {"type": "integer", "description": "Number of diffusion steps. Only pass when the user explicitly requests a specific step count."},
+                        "cfg_scale": {"type": "number", "description": "CFG scale. Only pass when the user explicitly requests it."},
+                        "guidance": {"type": "number", "description": "Distilled guidance scale (Flux models). Only pass when explicitly requested."},
+                        "seed": {"type": "integer", "description": "RNG seed for reproducible results. Only pass when explicitly requested. -1 = random."},
+                        "negative_prompt": {"type": "string", "description": "Negative prompt — what to avoid. Only pass when the user specifies what to avoid."},
+                        "sampler": {"type": "string", "description": "Sampling method (euler, euler_a, dpm++2m, lcm, etc.). Only pass when explicitly requested."},
+                        "scheduler": {"type": "string", "description": "Scheduler (discrete, karras, simple, etc.). Only pass when explicitly requested."},
                     },
                     "required": ["model", "message"],
                 },

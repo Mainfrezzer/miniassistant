@@ -653,6 +653,8 @@ def _vision_section(config: dict[str, Any]) -> str:
         example_model = img_gen_models[0]
         lines.append(f"- **Image generation models:** {models_str}.")
         lines.append(f"  Generate images: `invoke_model(model='{example_model}', message='YOUR PROMPT')`")
+        lines.append(f"  Optional parameters: `size`, `steps`, `cfg_scale`, `guidance`, `seed`, `negative_prompt`, `sampler`, `scheduler`.")
+        lines.append(f"  **Only pass these parameters when the user explicitly requests them.** Do NOT invent default values. If the user says nothing about steps/cfg/size, omit them entirely — the server has sensible defaults.")
         lines.append(f"  **Copy the model name EXACTLY as shown — including any `provider/` prefix.**")
         lines.append(
             "- **After generating an image:** Use `send_image(image_path='/path/to/image.png', caption='...')` to upload it to the current chat. "
@@ -751,6 +753,4 @@ def build_system_prompt(
         _docs_reference_section(config),
         _vision_section(config),
         _voice_section(config),
-        "---\n*End of system instructions. Everything below is the conversation.*",
-    ]
-    return "\n".join(parts).strip()
+        "---\n*End of system instructions. Everything below is the co

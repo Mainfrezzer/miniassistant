@@ -586,31 +586,55 @@ def api_generate_image(
     timeout: int = 600,
     steps: int | None = None,
     cfg_scale: float | None = None,
+    guidance: float | None = None,
+    sampler: str | None = None,
+    scheduler: str | None = None,
+    seed: int | None = None,
+    negative_prompt: str | None = None,
 ) -> dict[str, Any]:
     """
     OpenAI Image Generation – POST /v1/images/generations.
     Returns: {url: str, revised_prompt: str} oder {b64_json: str, revised_prompt: str}.
-    Für lokale Backends (LocalAI, Flux): DALL-E-spezifische Parameter werden weggelassen
-    wenn der Endpoint sie nicht kennt (erster Versuch mit, zweiter ohne).
-    Optionale Parameter (steps, cfg_scale) werden nur für lokale Backends gesendet.
-    Default: size=1024x1024, steps=20.
+    Für lokale Backends (sd-server / stable-diffusion.cpp): Generation-Parameter werden
+    als <sd_cpp_extra_args>-Tag im Prompt eingebettet, da sd-server sie im JSON-Body ignoriert.
+    Für DALL-E: nur size/quality/response_format (OpenAI-Standard).
     """
     # api_key ist optional für OpenAI-kompatible APIs (z.B. LocalAI, llama.cpp)
     url = _api_url(base_url, "/images/generations")
     is_openai = OPENAI_API_URL in base_url
-    body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
+
+    # Für lokale Backends: Parameter als <sd_cpp_extra_args> in Prompt einbetten,
+    # da sd-server (stable-diffusion.cpp) steps/cfg_scale/etc. im JSON-Body ignoriert.
+    api_prompt = prompt
+    if not is_openai:
+        extra: dict[str, Any] = {}
+        if steps is not None:
+            extra["steps"] = steps
+        if cfg_scale is not None:
+            extra["cfg_scale"] = cfg_scale
+        if guidance is not None:
+            extra["guidance"] = guidance
+        if sampler is not None:
+            extra["sample_method"] = sampler
+        if scheduler is not None:
+            extra["scheduler"] = scheduler
+        if seed is not None:
+            extra["seed"] = seed
+        if negative_prompt is not None:
+            extra["negative_prompt"] = negative_prompt
+        if extra:
+            api_prompt = f"{prompt}<sd_cpp_extra_args>{json.dumps(extra)}</sd_cpp_extra_args>"
+
+    body: dict[str, Any] = {"model": model, "prompt": api_prompt, "n": 1}
     if is_openai:
         # DALL-E braucht size/quality/response_format
         body["size"] = size
         body["quality"] = quality
         body["response_format"] = "b64_json"
     else:
-        # Lokale Backends (LocalAI/Flux): size + steps + optionale Parameter
+        # Lokale Backends: size wird vom JSON-Body gelesen, rest via sd_cpp_extra_args
         body["response_format"] = "b64_json"
         body["size"] = size
-        body["steps"] = steps if steps is not None else 20
-        if cfg_scale is not None:
-            body["cfg_scale"] = cfg_scale
 
     def _parse(resp: dict) -> dict:
         data = (resp.get("data") or [{}])[0]
