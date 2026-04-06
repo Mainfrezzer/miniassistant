@@ -1,158 +1,108 @@
 # Voice (STT + TTS)
 
-MiniAssistant supports voice messages on Matrix and Discord.
+Voice input and output on all platforms (Matrix, Discord, Web UI, OpenAI-compatible API).
+STT transcribes incoming audio. TTS generates spoken replies via `send_audio`. Both are optional and independent.
+**`send_audio` works on every platform** — including Web and API clients. Always use the tool, never output `<audio>` HTML tags directly.
 
-- **STT** (speech-to-text): transcribes incoming audio — recommended: [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or [wyoming-faster-whisper](https://github.com/rhasspy/wyoming-faster-whisper)
-- **TTS** (text-to-speech): two backends supported:
-  - **Piper** via Wyoming protocol (`tcp://`) — classic, low resource, many voices
-  - **Kokoro** via HTTP API (`http://`) — high quality neural TTS, OpenAI-compat API
+## Rules for voice replies
 
-Both STT and TTS are optional independently: STT-only → voice input with text reply. TTS-only is not useful.
+Read this section before using `send_audio` or replying to `[Voice]` messages.
 
-## Requirements
+**send_audio(text="...")** sends a voice reply. The text MUST be plain spoken language:
+- No emojis. No markdown. No symbols. No URLs. No coordinates. No technical IDs.
+- Short: 1-3 sentences. Only say what a human would say out loud.
+- Dense data (coordinates, specs, addresses) goes in a follow-up text message, not in audio.
+- After successful send_audio: **no text reply.** No confirmation. No "Technischer Hinweis".
 
-- `ffmpeg` installed on the system (added automatically by `install.sh`)
-- Running Wyoming STT and/or TTS server(s)
+**Incoming voice** (message starts with `[Voice]`): same rules. Plain, short, no formatting.
 
-## Quick start with Docker
-
-**STT (faster-whisper):**
-```bash
-docker run -it -p 10300:10300 \
-  -v ~/.cache/faster-whisper:/root/.cache/huggingface \
-  rhasspy/wyoming-faster-whisper \
-  --model tiny-int8 --language de
-```
-
-**TTS Option A — Piper (Wyoming):**
-```bash
-docker run -it -p 10200:10200 \
-  -v ~/.local/share/voices:/voices \
-  rhasspy/wyoming-piper \
-  --voice de_DE-thorsten-medium
-```
-Download Piper voices from: https://github.com/rhasspy/piper/blob/master/VOICES.md
-
-**TTS Option B — Kokoro (HTTP API):**
-```bash
-docker run -it -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.1
-# GPU variant:
-docker run -it -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-gpu:v0.2.1
-```
-Kokoro voices: `af_bella`, `af_sarah`, `af_sky`, `af_nicole`, `am_adam`, `am_michael`, `bf_emma`, `bm_george`, `bm_lewis`
-
-## Quick start without Docker
-
-**wyoming-faster-whisper:**
-```bash
-pip install wyoming-faster-whisper
-wyoming-faster-whisper --uri tcp://0.0.0.0:10300 --model tiny-int8 --language de
-```
-
-**wyoming-piper:**
-```bash
-pip install wyoming-piper
-# Download a voice first (see VOICES.md link above)
-wyoming-piper --uri tcp://0.0.0.0:10200 --piper /path/to/piper --voice de_DE-thorsten-medium
-```
-
-**Kokoro-FastAPI (pip):**
-```bash
-pip install kokoro-fastapi
-python -m kokoro_fastapi --port 8880
-```
-
-## Config
-
-Add to your `config.yaml` (or tell the agent: "richte Voice ein"):
-
-**With Piper (Wyoming):**
-```yaml
-voice:
-  stt:
-    url: tcp://localhost:10300      # Wyoming STT server
-  tts:
-    url: tcp://localhost:10200      # Wyoming TTS (Piper)
-  language: de                      # STT language hint (ISO 639-1)
-  tts_voice: de_DE-thorsten-medium  # Piper voice name
-```
-
-**With Kokoro:**
-```yaml
-voice:
-  stt:
-    url: tcp://localhost:10300      # Wyoming STT server (unchanged)
-  tts:
-    url: http://localhost:8880      # Kokoro-FastAPI HTTP server
-  language: de
-  tts_voice: af_bella              # Kokoro voice name (see voices below)
-```
-
-**With VibeVoice (via LocalAI):**
-```yaml
-voice:
-  stt:
-    url: tcp://localhost:10300      # Wyoming STT server (unchanged)
-  tts:
-    url: http://localhost:8080/tts  # LocalAI TTS endpoint (full path)
-    model: vibevoice               # TTS model name (default: kokoro)
-    voice: Emma                    # VibeVoice speaker: Alice, Frank, Emma, Carter, Davis, Grace, Mike, Samuel
-  language: de                      # Language for STT + TTS (ISO 639-1)
-```
-
-The TTS backend is auto-detected from the URL scheme: `tcp://` → Piper/Wyoming, `http://` → HTTP-API (Kokoro, LocalAI, etc.).
-
-**HTTP TTS URL handling:**
-- URL without path (e.g. `http://host:8880`) → appends `/v1/audio/speech` (OpenAI-compat, for Kokoro)
-- URL with path (e.g. `http://host:8080/tts`) → used as-is (for LocalAI or custom endpoints)
-
-Restart the service after saving. The agent can configure this via `save_config`.
-
-## How it works
-
-1. **Incoming audio** (Matrix `m.audio` or Discord audio attachment)
-2. `ffmpeg` converts to 16 kHz 16-bit mono PCM
-3. Sent to Wyoming STT → transcript
-4. Transcript sent to agent with `[Voice]` prefix → agent responds in spoken style
-5. Response sent to Wyoming TTS → WAV audio
-6. WAV sent back as audio message/attachment
-7. Tables and code blocks are always sent as separate text
-
-## Text formatting for send_audio
-
-When calling `send_audio(text="...")`, the text must be **plain spoken language** — no emojis, no markdown, no symbols, no coordinates, no URLs, no technical IDs or long numbers (they are read aloud literally and are meaningless as speech). Only include what a human would naturally say out loud.
-
-Dense data (coordinates, specs, addresses) goes in a **follow-up text message**, not in the audio.
-
-**Rewrite rules for spoken German — apply BEFORE calling send_audio:**
+### Text rewrite rules — apply BEFORE calling send_audio
 
 | Written form | Spoken form |
-|-------------|-------------|
-| Hyphens between numbers: `10-20` | `10 bis 20` (compound words like `E-Mail` stay) |
+|---|---|
+| Number ranges: `10-20` | `10 bis 20` (compounds like `E-Mail` stay) |
 | Times: `14:30` | `14 Uhr 30` |
 | Slashes: `km/h` | `Kilometer pro Stunde` |
 | `und/oder` | `und oder` |
 | `z.B.` | `zum Beispiel` |
-| `d.h.` | `das heißt` |
+| `d.h.` | `das heisst` |
 | `ca.` | `circa` |
 | `usw.` | `und so weiter` |
-| Numbered lists: `1. … 2. …` | `Erstens … Zweitens …` |
+| Numbered lists: `1. ... 2. ...` | `Erstens ... Zweitens ...` |
 
-**After a successful `send_audio`: no text reply, no confirmation, no "Technischer Hinweis".**
+Tables and code blocks are automatically extracted and sent as separate text message.
 
-## Supported audio formats (incoming)
+## Setup
 
-Anything `ffmpeg` can decode: ogg, mp3, wav, m4a, webm, flac, aac, …
+**Requirements:** `ffmpeg` (added by `install.sh`). A running STT and/or TTS server.
 
-Matrix voice messages are typically OGG Opus — supported natively.
-Discord voice messages are typically OGG Opus as well.
+### STT — faster-whisper (recommended)
+```bash
+# Docker
+docker run -it -p 10300:10300 rhasspy/wyoming-faster-whisper --model tiny-int8 --language de
+# Or pip
+pip install wyoming-faster-whisper
+wyoming-faster-whisper --uri tcp://0.0.0.0:10300 --model tiny-int8 --language de
+```
+
+### TTS option A — Piper (lightweight, many voices)
+```bash
+docker run -it -p 10200:10200 rhasspy/wyoming-piper --voice de_DE-thorsten-medium
+```
+Voices: https://github.com/rhasspy/piper/blob/master/VOICES.md
+
+### TTS option B — Kokoro (high quality neural)
+```bash
+docker run -it -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.1
+```
+Voices: `af_bella`, `af_sarah`, `af_sky`, `af_nicole`, `am_adam`, `am_michael`, `bf_emma`, `bm_george`, `bm_lewis`
+
+## Config
+
+```yaml
+# Piper (Wyoming protocol):
+voice:
+  stt:
+    url: tcp://localhost:10300
+  tts:
+    url: tcp://localhost:10200
+  language: de
+  tts_voice: de_DE-thorsten-medium
+
+# Kokoro (HTTP API):
+voice:
+  stt:
+    url: tcp://localhost:10300
+  tts:
+    url: http://localhost:8880
+  tts_voice: af_bella
+
+# LocalAI / VibeVoice:
+voice:
+  tts:
+    url: http://localhost:8080/tts
+    model: vibevoice
+    voice: Emma
+```
+
+Backend auto-detected from URL scheme: `tcp://` = Wyoming/Piper, `http://` = HTTP API.
+HTTP without path appends `/v1/audio/speech`. HTTP with path is used as-is.
+Restart after config changes.
+
+## How it works
+
+1. Incoming audio → ffmpeg → 16kHz mono PCM → STT → transcript
+2. Transcript sent to agent with `[Voice]` prefix
+3. Agent responds → TTS → WAV → audio message back
+4. Tables and code blocks extracted and sent as separate text
+
+Supported input: anything ffmpeg decodes (ogg, mp3, wav, m4a, webm, flac, aac, ...).
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
+| Problem | Fix |
+|---|---|
 | "Sprachfunktion nicht konfiguriert" | `voice.stt.url` missing in config |
-| "Spracherkennung fehlgeschlagen" | STT server not reachable or ffmpeg not installed |
-| "Konnte Sprachnachricht nicht erkennen" | Empty transcript — try a different model or check language setting |
-| TTS fails, text reply sent instead | TTS server not reachable — check `voice.tts.url` |
-| Audio not playing in Matrix | Verify `m.audio` support in your Matrix client |
+| "Spracherkennung fehlgeschlagen" | STT server unreachable or ffmpeg missing |
+| "Konnte Sprachnachricht nicht erkennen" | Empty transcript — try different model or check language |
+| TTS fails, text sent instead | TTS server unreachable — check `voice.tts.url` |

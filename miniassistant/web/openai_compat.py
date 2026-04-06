@@ -408,6 +408,24 @@ async def chat_completions(request: Request):
     # Tool-Call-XML aus Content entfernen (Safety-Net)
     content = _strip_tool_call_xml(content)
 
+    # <audio> HTML-Tags in Markdown-Links umwandeln (OpenWebUI rendert kein HTML)
+    _ns_base = (config.get("_chat_context") or {}).get("_api_base_url", "")
+    def _ns_audio_link(m: _re.Match) -> str:
+        src = m.group(1)
+        _ws_m = _re.search(r'path=audio[/%]2[fF]([^&"]+)', src)
+        if _ws_m:
+            _fn = _ws_m.group(1)
+            _st = _fn.rsplit(".", 1)[0] if "." in _fn else _fn
+            src = f"{_ns_base}/api/audio/{_st}"
+        elif src.startswith("/") and _ns_base:
+            src = _ns_base + src
+        return f'[🔊 Sprachnachricht anhören]({src})'
+    content = _re.sub(
+        r'<audio[^>]*\bsrc="([^"]+)"[^>]*></audio>',
+        _ns_audio_link,
+        content,
+    )
+
     # Memory speichern
     append_exchange(user_content, content)
 
@@ -448,6 +466,36 @@ def _stream_generator(
 
     total_content = ""
     total_thinking = ""
+    _audio_buf = ""  # Buffer für <audio>-Tag-Erkennung über Chunk-Grenzen
+
+    _api_base = (config.get("_chat_context") or {}).get("_api_base_url", "")
+
+    def _fix_audio_url(m: _re.Match) -> str:
+        """<audio> beibehalten, aber URL auf absoluten /api/audio/ Endpoint umschreiben."""
+        src = m.group(1)
+        # /api/workspace/raw?path=audio/tts_xxx.wav → /api/audio/tts_xxx
+        _ws_match = _re.search(r'path=audio[/%]2[fF]([^&"]+)', src)
+        if _ws_match:
+            _fname = _ws_match.group(1)
+            _stem = _fname.rsplit(".", 1)[0] if "." in _fname else _fname
+            src = f"{_api_base}/api/audio/{_stem}"
+        elif src.startswith("/") and _api_base:
+            src = _api_base + src
+        return f'[🔊 Sprachnachricht anhören]({src})'
+
+    def _flush_audio_buf(buf: str) -> tuple[str, str]:
+        """Verarbeitet Buffer: vollständige <audio>-Tags → Markdown-Links, Rest zurück in Buffer."""
+        # Vollständige Tags ersetzen
+        buf = _re.sub(
+            r'<audio[^>]*\bsrc="([^"]+)"[^>]*></audio>',
+            _fix_audio_url,
+            buf,
+        )
+        # Prüfen ob ein offener <audio-Tag am Ende steht
+        _open = buf.rfind("<audio")
+        if _open != -1 and "</audio>" not in buf[_open:]:
+            return buf[:_open], buf[_open:]
+        return buf, ""
 
     try:
         for ev in chat_round_stream(
@@ -460,12 +508,27 @@ def _stream_generator(
                 total_thinking += ev["delta"]
                 yield _make_stream_chunk(completion_id, model_display, thinking=ev["delta"])
             elif ev_type == "content" and ev.get("delta"):
-                total_content += ev["delta"]
-                yield _make_stream_chunk(completion_id, model_display, content=ev["delta"])
+                _audio_buf += ev["delta"]
+                _emit, _audio_buf = _flush_audio_buf(_audio_buf)
+                if _emit:
+                    total_content += _emit
+                    yield _make_stream_chunk(completion_id, model_display, content=_emit)
             elif ev_type == "status":
                 # Keepalive: leerer Delta-Chunk hält den Socket offen
                 yield _make_stream_chunk(completion_id, model_display)
             elif ev_type == "done":
+                # Buffer flushen
+                if _audio_buf:
+                    _emit, _leftover = _flush_audio_buf(_audio_buf)
+                    # Noch offener <audio-Tag im Buffer → Tag schließen und konvertieren
+                    if _leftover:
+                        _closed = _leftover + "</audio>"
+                        _emit2, _ = _flush_audio_buf(_closed)
+                        _emit += _emit2
+                    if _emit:
+                        total_content += _emit
+                        yield _make_stream_chunk(completion_id, model_display, content=_emit)
+                    _audio_buf = ""
                 # done-Event: finale Inhalte (bereinigt) übernehmen.
                 # Pending images als separate Chunks senden — jedes Bild einzeln
                 # damit OpenWebUI die vollständige Markdown-Syntax parsen kann.
@@ -475,6 +538,9 @@ def _stream_generator(
                 for _img in (ev.get("images") or []):
                     _img_md = f"\n\n![{_img['caption']}]({_img['url']})\n\n"
                     yield _make_stream_chunk(completion_id, model_display, content=_img_md)
+                for _aud in (ev.get("audio") or []):
+                    _aud_md = f'\n\n[🔊 Sprachnachricht anhören]({_aud["url"]})\n\n'
+                    yield _make_stream_chunk(completion_id, model_display, content=_aud_md)
                 total_content = final_content
                 total_thinking = final_thinking
                 break

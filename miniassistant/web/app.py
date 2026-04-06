@@ -1000,6 +1000,8 @@ async def chat_page(request: Request):
     <div class="chat-footer"><span id="no-save-hint" style="opacity:0.7;">Konversationen werden nicht gespeichert (Seite neu laden = neuer Chat).</span> {onboarding_link}<a href="/{token_q}" class="btn btn-outline" style="padding:0.3em 0.7em;font-size:0.85em;">Startseite</a></div>
     </div>
     <script>
+    const _purifyConfig = {{ ADD_TAGS: ["audio"], ADD_ATTR: ["controls", "src", "autoplay"] }};
+    function sanitize(html) {{ return DOMPurify.sanitize(html, _purifyConfig); }}
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token") || "";
     const log = document.getElementById("log");
@@ -1118,7 +1120,7 @@ async def chat_page(request: Request):
               wrap.appendChild(uDiv);
               const aDiv = document.createElement("div");
               aDiv.className = "markdown";
-              aDiv.innerHTML = typeof marked !== "undefined" ? DOMPurify.sanitize(marked.parse(ex.assistant || "")) : (ex.assistant || "");
+              aDiv.innerHTML = typeof marked !== "undefined" ? sanitize(marked.parse(ex.assistant || "")) : (ex.assistant || "");
               aDiv.style.marginBottom = "0.6rem";
               wrap.appendChild(aDiv);
             }});
@@ -1148,7 +1150,7 @@ async def chat_page(request: Request):
       const content = document.createElement("div");
       content.className = "content" + (isMarkdown ? " markdown" : "");
       if (isMarkdown && typeof marked !== "undefined")
-        content.innerHTML = DOMPurify.sanitize(marked.parse(text || ""));
+        content.innerHTML = sanitize(marked.parse(text || ""));
       else
         content.textContent = text || "";
       p.appendChild(content);
@@ -1182,7 +1184,7 @@ async def chat_page(request: Request):
       if (answer) {{
         const md = document.createElement("div");
         md.className = "markdown";
-        md.innerHTML = typeof marked !== "undefined" ? DOMPurify.sanitize(marked.parse(answer)) : escapeHtml(answer);
+        md.innerHTML = typeof marked !== "undefined" ? sanitize(marked.parse(answer)) : escapeHtml(answer);
         wrap.appendChild(md);
       }}
       p.appendChild(wrap);
@@ -1237,12 +1239,12 @@ async def chat_page(request: Request):
         wrap.appendChild(details);
         const md = document.createElement("div");
         md.className = "markdown";
-        md.innerHTML = typeof marked !== "undefined" ? DOMPurify.sanitize(marked.parse(contentText)) : escapeHtml(contentText);
+        md.innerHTML = typeof marked !== "undefined" ? sanitize(marked.parse(contentText)) : escapeHtml(contentText);
         wrap.appendChild(md);
       }} else if (contentText) {{
         const md = document.createElement("div");
         md.className = "markdown";
-        md.innerHTML = typeof marked !== "undefined" ? DOMPurify.sanitize(marked.parse(contentText)) : escapeHtml(contentText);
+        md.innerHTML = typeof marked !== "undefined" ? sanitize(marked.parse(contentText)) : escapeHtml(contentText);
         wrap.appendChild(md);
       }} else if (thinkingText) {{
         const note = document.createElement("p");
@@ -1251,7 +1253,7 @@ async def chat_page(request: Request):
         wrap.appendChild(note);
         const md = document.createElement("div");
         md.className = "markdown";
-        md.innerHTML = typeof marked !== "undefined" ? DOMPurify.sanitize(marked.parse(thinkingText)) : escapeHtml(thinkingText);
+        md.innerHTML = typeof marked !== "undefined" ? sanitize(marked.parse(thinkingText)) : escapeHtml(thinkingText);
         wrap.appendChild(md);
       }} else if (!doneData || !doneData.error) {{
         const empty = document.createElement("p");
@@ -3286,6 +3288,28 @@ async def api_serve_generated_image(img_name: str):
         candidate = (workspace / "images" / f"{img_name}{ext}").resolve()
         if str(candidate).startswith(str(workspace)) and candidate.exists():
             return FileResponse(str(candidate), media_type=mime)
+    raise HTTPException(status_code=404)
+
+
+@app.get("/api/audio/{audio_name}")
+async def api_serve_audio(audio_name: str):
+    """Liefert eine generierte Audio-Datei aus workspace/audio/ anhand des Dateinamens.
+    Kein Token nötig — der Dateiname enthält UUID und ist unique."""
+    config = load_config()
+    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    if not workspace.is_dir():
+        raise HTTPException(status_code=404)
+    # audio_name kann mit oder ohne .wav kommen
+    for ext in (".wav", ".mp3", ".ogg"):
+        if audio_name.lower().endswith(ext):
+            candidate = (workspace / "audio" / audio_name).resolve()
+            if str(candidate).startswith(str(workspace)) and candidate.exists():
+                _mime = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg"}[ext]
+                return FileResponse(str(candidate), media_type=_mime)
+        candidate = (workspace / "audio" / f"{audio_name}{ext}").resolve()
+        if str(candidate).startswith(str(workspace)) and candidate.exists():
+            _mime = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg"}[ext]
+            return FileResponse(str(candidate), media_type=_mime)
     raise HTTPException(status_code=404)
 
 

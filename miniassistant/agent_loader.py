@@ -300,45 +300,20 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         return ""
     d = str(docs)
     return (
-        "## Docs reference (read only when needed)\n"
-        f"Documentation directory: `{d}/`\n"
-        f"Each topic is a separate file. **Read only the file you need** (`cat \"{d}/FILE\"`), never all of them.\n"
-        "When a topic is relevant, **read the file yourself and follow the instructions** — do not tell the user to read it.\n\n"
-        "**Read-first rules:** Before configuring Matrix/Discord/Voice (installation, server setup, save_config), read the matching doc file first. Do NOT read docs just to use a tool — `send_audio`, `send_image`, `web_search` etc. can be called directly.\n\n"
-        "| File | Topic |\n"
-        "|------|-------|\n"
-        f"| `MATRIX.md` | Configuring YOUR bot connection (chat_clients.matrix) |\n"
-        f"| `DISCORD.md` | Configuring YOUR bot connection (chat_clients.discord) |\n"
-        f"| `CONFIG_REFERENCE.md` | Config structure, save_config rules |\n"
-        "| `PROVIDERS.md` | Multiple Ollama instances, Ollama Online, Anthropic |\n"
-        "| `CONTEXT_SIZE.md` | num_ctx, per-model context |\n"
-        "| `SCHEDULES.md` | Schedule tool, cron jobs, workspace cleanup protection |\n"
-        "| `GITHUB.md` | GitHub REST API, token usage, repo tracking |\n"
-        "| `SEARCH_ENGINES.md` | SearXNG setup |\n"
-        "| `SUBAGENTS.md` | Worker models, invoke_model |\n"
-        "| `VISION.md` | Image analysis |\n"
-        "| `IMAGE_GENERATION.md` | Image generation |\n"
-        "| `DEBATE.md` | Multi-round AI debate |\n"
-        "| `AVATARS.md` | Bot profile picture |\n"
-        "| `EMAIL.md` | IMAP/SMTP, multi-account, tracking, auto-reply |\n"
-        "| `VOICE.md` | Wyoming STT/TTS, voice setup, send_audio text formatting |\n"
-        "| `CHAT_HISTORY.md` | How to find past conversations (date → memory file → summarize) |\n"
-        "| `TRACKING.md` | Long-running tracking (calories, expenses, habits) — folder structure, monthly files |\n"
-        "| `PROMPT_ENGINEERING.md` | Writing prompts/rules/instructions for LLMs |\n"
-        "| `WEB_FETCHING.md` | read_url JS rendering (Playwright) and proxies |\n"
-        "| `API_REFERENCE.md` | REST API endpoints, OpenAI-compatible API |\n"
-        "| `DIRECTIONS.md` | Directions format, multi-task layout, curl rules, when to create |\n\n"
+        "## Docs (read only when needed)\n"
+        f"Directory: `{d}/`\n"
+        f"Read only the file you need (`cat \"{d}/FILE\"`). Follow its instructions — do not tell the user to read it.\n"
+        "Before configuring Matrix/Discord/Voice: read the matching doc first.\n\n"
+        f"**Setup:** `CONFIG_REFERENCE.md` · `PROVIDERS.md` · `CONTEXT_SIZE.md` · `SEARCH_ENGINES.md`\n"
+        f"**Chat:** `MATRIX.md` · `DISCORD.md` · `EMAIL.md` · `AVATARS.md` · `CHAT_HISTORY.md`\n"
+        f"**Features:** `VOICE.md` (STT/TTS, send_audio rules) · `VISION.md` · `IMAGE_GENERATION.md` · `SCHEDULES.md` · `SUBAGENTS.md` · `DEBATE.md`\n"
+        f"**Tools:** `GITHUB.md` (REST API, repo tracking) · `WEB_FETCHING.md` (Playwright) · `API_REFERENCE.md` · `DIRECTIONS.md`\n"
+        f"**Guides:** `PLANNING.md` · `PROMPT_ENGINEERING.md` · `TRACKING.md` (calories, expenses, habits)\n\n"
         "## Directions (reusable task instructions)\n"
         f"Directory: `{config.get('agent_dir', 'agent_dir')}/directions/`\n"
-        "Directions are self-contained Markdown files with exact instructions for recurring tasks (API calls, scheduled jobs, etc.). "
-        "A file can cover ONE or MULTIPLE tasks (sections separated by `---`). "
-        f"Full format guide: read `{d}/DIRECTIONS.md`.\n\n"
-        "**Read a directions file when:**\n"
-        "- The prompt explicitly says 'lies directions/...', 'folge der Direktive', 'nutze die ... Direktive'\n"
-        "- A scheduled task references a directions file — read it and execute the specified task\n"
-        "- The user asks you to create or update a directions file → "
-        f"read `{d}/DIRECTIONS.md` for format first\n"
-        "Do NOT speculatively check directions/ on every request.\n"
+        "Self-contained Markdown files for recurring tasks. "
+        f"Format: read `{d}/DIRECTIONS.md`.\n"
+        "Read when: prompt says so, a schedule references one, or user asks to create/update one.\n"
     )
 
 
@@ -500,14 +475,10 @@ def _tools_section(config: dict[str, Any]) -> str:
     lines.append("- `check_url`: only when user explicitly asks to verify/check links.")
     lines.append(
         "- **URL / web fetching rules:**\n"
-        "  (a) Never construct, guess, or assume URLs, API endpoints, or query parameters from memory — "
-        "training data is outdated. Always verify a URL is real and accessible before using it.\n"
-        "  (b) `read_url` can only READ static content — it CANNOT fill forms, click buttons, or navigate multi-step flows. "
-        "For any site that requires form interaction (package tracking, login, search forms): use `exec` with a Playwright script. "
-        "Read `WEB_FETCHING.md` for the exact inspect-first pattern.\n"
-        "  (c) **Escalation rule:** If `read_url` returns the homepage, an error, or generic content instead of the specific data you need: "
-        "the site requires form interaction. Do NOT give up. Do NOT tell the user the data is unavailable. "
-        "Immediately escalate to a Playwright script via `exec` — inspect the page first, then interact."
+        "  `read_url` can only READ static content — it CANNOT fill forms, click buttons, or navigate multi-step flows. "
+        "For sites that require form interaction: use `exec` with Playwright. Read `WEB_FETCHING.md` for details.\n"
+        "  **Escalation:** If `read_url` returns the homepage or generic content instead of specific data: "
+        "escalate to Playwright via `exec` — inspect the page first, then interact."
     )
     # read_url: Basis-Regel + Proxy-Info falls konfiguriert
     from miniassistant.tools import get_read_url_proxy_names
@@ -678,8 +649,11 @@ def _vision_section(config: dict[str, Any]) -> str:
     cfg_path = str(_config_path(None))
     if img_gen_models:
         models_str = ", ".join(f"`{m}`" for m in img_gen_models)
-        lines.append(f"- **Image generation models:** {models_str}. Use `invoke_model(model='MODEL_NAME', message='PROMPT')` to generate images.")
-        lines.append("  Use the **exact model name** as listed (including `provider/` prefix).")
+        # Konkretes Aufruf-Beispiel mit erstem Modellnamen statt Platzhalter
+        example_model = img_gen_models[0]
+        lines.append(f"- **Image generation models:** {models_str}.")
+        lines.append(f"  Generate images: `invoke_model(model='{example_model}', message='YOUR PROMPT')`")
+        lines.append(f"  **Copy the model name EXACTLY as shown — including any `provider/` prefix.**")
         lines.append(
             "- **After generating an image:** Use `send_image(image_path='/path/to/image.png', caption='...')` to upload it to the current chat. "
             "The tool handles Matrix upload (via bot client, E2EE-capable), Discord upload, and Web-UI automatically. No curl needed.\n"
@@ -703,22 +677,18 @@ def _vision_section(config: dict[str, Any]) -> str:
 
 
 def _voice_section(config: dict[str, Any]) -> str:
-    """Voice-Mode-Hinweise — wenn STT oder TTS konfiguriert ist."""
+    """Voice-Mode-Hinweise ��� wenn STT oder TTS konfiguriert ist."""
     from miniassistant.config import get_voice_stt_url, get_voice_tts_url
     has_stt = bool(get_voice_stt_url(config))
     has_tts = bool(get_voice_tts_url(config))
     if not has_stt and not has_tts:
         return ""
+    docs = _docs_dir_path(config)
+    voice_md = f"{docs}/VOICE.md" if docs else "docs/VOICE.md"
+    mode = "STT + TTS" if has_stt and has_tts else ("STT only" if has_stt else "TTS only")
     lines = ["\n## Voice Mode"]
-    if has_tts:
-        lines.append("**Sending audio:** `send_audio(text=\"...\")` — call it immediately when the user wants a voice/audio message. No setup, no config reading. After success: no text reply.")
-    if has_stt:
-        lines.append(
-            "**Incoming voice** (message starts with `[Voice]`): respond in plain spoken language — "
-            "no markdown, no tables, no code blocks. Be concise (1-3 sentences). "
-            "Tables and code are sent as separate text automatically."
-        )
-    lines.append("**No emojis.** Never use emojis, emoticons, or kaomoji — TTS cannot pronounce them and they disrupt the listening experience.")
+    lines.append(f"Voice active ({mode}). **Read `{voice_md}` before sending or replying to voice.**")
+    lines.append("Key: no emojis, no markdown, plain short sentences. Apply rewrite rules from VOICE.md before send_audio.")
     lines.append("")
     return "\n".join(lines)
 
@@ -746,23 +716,7 @@ def build_system_prompt(
 
     parts = [
         "# Role and context",
-        "You are the assistant of **MiniAssistant**. The user may be chatting via the Web-UI or any configured chat client (Matrix, Discord, …).",
-        "**ABSOLUTE RULE: NEVER respond without using tools first. NEVER tell the user what THEY can do — YOU do it. If you need information, search for it. If something fails, try alternatives. The user hired you to WORK, not to give advice.**\n\n"
-        "**Core rules:** "
-        "(1) **Just do it.** Use your tools immediately — don't explain what you *would* do, just do it. The user wants results, not your thought process. (Exception: if the user asks *how* you would do something, explain first — then act only after they confirm.) "
-        "(2) **Inform first, then act.** Before doing anything that touches an external system, file, page, or API: gather current state first with your tools — never assume, never use training-data memory. "
-        "The pattern is always: **look → think → act**. Never skip the look step. "
-        "Before answering a factual question → `web_search`. "
-        "Before interacting with a web page → load and inspect it first, then act. "
-        "Before editing a file → read it. "
-        "Before using an API or URL → verify it exists and is publicly accessible with a real request first. "
-        "**URLs and APIs: never construct, guess, or assume.** Your training data is outdated — site structures, API endpoints, and query parameters change constantly. "
-        "A URL you think exists may return 404, require auth, or be completely different. Always: (a) `web_search` to find the current official URL/API docs, then (b) `read_url` to verify it actually loads and is accessible, then (c) act. "
-        "**Exception:** Questions about your own capabilities or tools → answer from your system prompt, do NOT web_search. "
-        "(3) **Step by step.** One tool call at a time, check the result, then next step. "
-        "(4) **Real values, real results.** Never use placeholder strings (`HOMESERVER`, `BOT_TOKEN`) — read config first. End with a clear, verified answer — not guesses. "
-        "(5) **Read docs yourself.** If you need a docs file, read it and follow the instructions — don't tell the user to read it. "
-        "(6) **Don't over-ask.** If you have enough information to proceed, just do it. Only ask when essential info is truly missing (e.g. credentials the config doesn't have).",
+        "You are the assistant of **MiniAssistant**. The user may be chatting via the Web-UI or any configured chat client (Matrix, Discord, ...).",
         "",
         "## Chat history",
         "Facts from this conversation (IPs, hosts, paths, preferences) stay valid until corrected. Only avoid resuming *unrelated* old topics.",

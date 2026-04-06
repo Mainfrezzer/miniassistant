@@ -1588,6 +1588,43 @@ def _run_tool(
         platform = chat_ctx.get("platform")
         room_id = chat_ctx.get("room_id")
         channel_id = chat_ctx.get("channel_id")
+        # Web/API: TTS lokal ausführen, WAV im Workspace speichern, URL durchreichen
+        if platform in ("web", "api") or (not platform and not room_id and not channel_id):
+            try:
+                from miniassistant.config import get_voice_tts_url, get_voice_tts_voice, get_voice_tts_options, get_voice_tts_model, get_voice_tts_language
+                tts_url = get_voice_tts_url(config)
+                if not tts_url:
+                    return "TTS nicht konfiguriert (voice.tts.url fehlt)"
+                from miniassistant import wyoming_client as _wc
+                wav_bytes = _wc.synthesize(
+                    text, tts_url,
+                    voice=get_voice_tts_voice(config),
+                    model=get_voice_tts_model(config),
+                    language=get_voice_tts_language(config),
+                    **get_voice_tts_options(config),
+                )
+                # WAV im Workspace speichern
+                from pathlib import Path as _Path
+                import uuid as _uuid
+                _ws = _Path(config.get("workspace") or "").expanduser().resolve()
+                _audio_dir = _ws / "audio"
+                _audio_dir.mkdir(parents=True, exist_ok=True)
+                _fname = f"tts_{_uuid.uuid4().hex[:12]}.wav"
+                _audio_path = _audio_dir / _fname
+                _audio_path.write_bytes(wav_bytes)
+                # URL für Web/API-Client
+                if platform == "web":
+                    from urllib.parse import quote as _url_quote
+                    _rel = str(_audio_path.relative_to(_ws))
+                    _audio_url = f"/api/workspace/raw?path={_url_quote(_rel)}"
+                else:
+                    # API (OpenWebUI etc.): eigener Endpoint ohne Token, absolute URL
+                    _api_base = chat_ctx.get("_api_base_url", "")
+                    _audio_url = f"{_api_base}/api/audio/{_audio_path.stem}"
+                config.setdefault("_pending_audio", []).append({"url": _audio_url, "text": text[:200]})
+                return f"Voice message delivered to user ({len(text)} chars, {len(wav_bytes)} bytes)"
+            except Exception as e:
+                return f"send_audio failed: {e}"
         try:
             from miniassistant.notify import send_audio as _send_aud
             results = _send_aud(text, client=platform, room_id=room_id, channel_id=channel_id, config=config)
@@ -3412,6 +3449,12 @@ def chat_round(
         _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
         _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
 
+    # Pending Audio injizieren (send_audio für Web/API)
+    _pending_auds = config.pop("_pending_audio", [])
+    if _pending_auds:
+        _aud_html = "\n\n".join(f'<audio controls src="{aud["url"]}"></audio>' for aud in _pending_auds)
+        _final_content = f"{_final_content}\n\n{_aud_html}" if _final_content else _aud_html
+
     # Konversationshistorie bereinigen (spart Kontext-Tokens)
     if msgs_final:
         for _m in msgs_final:
@@ -3808,10 +3851,15 @@ def chat_round_stream(
             if _pending_imgs:
                 _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
                 _done_content = f"{_done_content}\n\n{_img_md}" if _done_content else _img_md
+            # Pending Audio injizieren (send_audio für Web/API)
+            _pending_auds = config.pop("_pending_audio", [])
+            if _pending_auds:
+                _aud_html = "\n\n".join(f'<audio controls src="{aud["url"]}"></audio>' for aud in _pending_auds)
+                _done_content = f"{_done_content}\n\n{_aud_html}" if _done_content else _aud_html
             # TPS: letzte Runde (_t0_stream) verwenden — schließt Tool-Wartezeit aus
             _done_tps = _aal.extract_tps(last_response, time.monotonic() - _t0_stream, _done_content, _done_thinking)
             _ctx_used = _last_real_ctx or (_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs))
-            yield {"type": "done", "thinking": _done_thinking, "content": _done_content, "images": _pending_imgs, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _done_tps, "ctx": [_ctx_used, _ctx_max]}
+            yield {"type": "done", "thinking": _done_thinking, "content": _done_content, "images": _pending_imgs, "audio": _pending_auds, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _done_tps, "ctx": [_ctx_used, _ctx_max]}
             return
 
         _tool_names = [n for n, _ in tool_calls]
@@ -3899,8 +3947,8 @@ def chat_round_stream(
             for name, args, result in (tool_results or []):
                 _aal.log_tool_call(config, name, args, result)
                 msgs.append({"role": "tool", "tool_name": name, "content": result})
-                if name == "send_image":
-                    # Web/API: Bild kommt als Markdown-Image im Content zurück → nicht unterdrücken
+                if name in ("send_image", "send_audio"):
+                    # Web/API: Bild/Audio kommt als HTML im Content zurück → nicht unterdrücken
                     _img_platform = (config.get("_chat_context") or {}).get("platform")
                     if _img_platform not in ("web", "api"):
                         _sent_image = True
@@ -3998,13 +4046,19 @@ def chat_round_stream(
         _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
         _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
 
+    # Pending Audio injizieren (send_audio für Web/API)
+    _pending_auds = config.pop("_pending_audio", [])
+    if _pending_auds:
+        _aud_html = "\n\n".join(f'<audio controls src="{aud["url"]}"></audio>' for aud in _pending_auds)
+        _final_content = f"{_final_content}\n\n{_aud_html}" if _final_content else _aud_html
+
     # Halluzinierte base64-Bilder aus Messages entfernen (fressen Kontext)
     for _m in msgs:
         if _m.get("role") == "assistant" and _m.get("content") and "base64," in _m["content"]:
             _m["content"] = _strip_hallucinated_base64(_m["content"])
 
     _final_tps = _aal.extract_tps(last_response, time.monotonic() - _t0_stream, _final_content, _final_thinking)
-    yield {"type": "done", "thinking": _final_thinking, "content": _final_content, "images": _pending_imgs, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _final_tps, "ctx": [_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs), _ctx_max]}
+    yield {"type": "done", "thinking": _final_thinking, "content": _final_content, "images": _pending_imgs, "audio": _pending_auds, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _final_tps, "ctx": [_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs), _ctx_max]}
 
 
 def _normalize_cmd(raw: str) -> str:
