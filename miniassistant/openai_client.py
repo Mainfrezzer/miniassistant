@@ -25,7 +25,7 @@ _log = logging.getLogger("miniassistant.openai_client")
 
 # OpenAI API Defaults
 OPENAI_API_URL = "https://api.openai.com"
-_TIMEOUT = 3600
+_TIMEOUT = 120
 
 
 # ═══════════════════════════════════════════════════════════════════════════
