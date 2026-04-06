@@ -25,7 +25,7 @@ _log = logging.getLogger("miniassistant.openai_client")
 
 # OpenAI API Defaults
 OPENAI_API_URL = "https://api.openai.com"
-_TIMEOUT = 120
+_TIMEOUT = 3600
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -586,77 +586,98 @@ def api_generate_image(
     timeout: int = 600,
     steps: int | None = None,
     cfg_scale: float | None = None,
-    guidance: float | None = None,
-    sampler: str | None = None,
-    scheduler: str | None = None,
-    seed: int | None = None,
-    negative_prompt: str | None = None,
 ) -> dict[str, Any]:
-    """
-    OpenAI Image Generation – POST /v1/images/generations.
-    Returns: {url: str, revised_prompt: str} oder {b64_json: str, revised_prompt: str}.
-    Für lokale Backends (sd-server / stable-diffusion.cpp): Generation-Parameter werden
-    als <sd_cpp_extra_args>-Tag im Prompt eingebettet, da sd-server sie im JSON-Body ignoriert.
-    Für DALL-E: nur size/quality/response_format (OpenAI-Standard).
-    """
-    # api_key ist optional für OpenAI-kompatible APIs (z.B. LocalAI, llama.cpp)
+    import base64
+    import httpx
+    from urllib.parse import urljoin
+
     url = _api_url(base_url, "/images/generations")
     is_openai = OPENAI_API_URL in base_url
 
-    # Für lokale Backends: Parameter als <sd_cpp_extra_args> in Prompt einbetten,
-    # da sd-server (stable-diffusion.cpp) steps/cfg_scale/etc. im JSON-Body ignoriert.
-    api_prompt = prompt
-    if not is_openai:
-        extra: dict[str, Any] = {}
-        if steps is not None:
-            extra["steps"] = steps
-        if cfg_scale is not None:
-            extra["cfg_scale"] = cfg_scale
-        if guidance is not None:
-            extra["guidance"] = guidance
-        if sampler is not None:
-            extra["sample_method"] = sampler
-        if scheduler is not None:
-            extra["scheduler"] = scheduler
-        if seed is not None:
-            extra["seed"] = seed
-        if negative_prompt is not None:
-            extra["negative_prompt"] = negative_prompt
-        if extra:
-            api_prompt = f"{prompt}<sd_cpp_extra_args>{json.dumps(extra)}</sd_cpp_extra_args>"
+    body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
 
-    body: dict[str, Any] = {"model": model, "prompt": api_prompt, "n": 1}
     if is_openai:
-        # DALL-E braucht size/quality/response_format
         body["size"] = size
         body["quality"] = quality
         body["response_format"] = "b64_json"
     else:
-        # Lokale Backends: size wird vom JSON-Body gelesen, rest via sd_cpp_extra_args
         body["response_format"] = "b64_json"
         body["size"] = size
+        body["steps"] = steps if steps is not None else 20
+        if cfg_scale is not None:
+            body["cfg_scale"] = cfg_scale
 
-    def _parse(resp: dict) -> dict:
-        data = (resp.get("data") or [{}])[0]
-        b64 = data.get("b64_json", "")
-        if not b64 and data.get("url", "").startswith("data:"):
-            # Some backends return data-URI instead of b64_json field
-            b64 = data["url"].split(",", 1)[-1]
+    def _parse(resp) -> dict:
+        # Normalize response
+        if isinstance(resp, list):
+            data = resp[0] if resp else {}
+        elif isinstance(resp, dict):
+            if isinstance(resp.get("data"), list):
+                data = resp["data"][0] if resp["data"] else {}
+            else:
+                data = resp
+        else:
+            data = {}
+
+        b64 = ""
+        img_url = ""
+
+        if isinstance(data, dict):
+            img_url = data.get("url", "")
+            b64 = data.get("b64_json", "")
+
+            # ✅ handle data URI
+            if not b64 and isinstance(img_url, str) and img_url.startswith("data:"):
+                b64 = img_url.split(",", 1)[-1]
+
+            # ✅ fetch from OpenWebUI file endpoint
+            if not b64 and img_url:
+                full_url = urljoin(base_url, img_url)
+
+                headers = {}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+
+                try:
+                    r = httpx.get(full_url, headers=headers, timeout=120)
+                    r.raise_for_status()
+
+                    # Ensure we actually got an image
+                    content_type = r.headers.get("content-type", "")
+                    if "image" in content_type:
+                        b64 = base64.b64encode(r.content).decode("utf-8")
+                    else:
+                        print("WARNING: Not an image response:", content_type)
+
+                except Exception as e:
+                    print("IMAGE DOWNLOAD FAILED:", full_url, e)
+
         return {
             "b64_json": b64,
-            "url": data.get("url", ""),
-            "revised_prompt": data.get("revised_prompt", ""),
+            "url": img_url,
+            "revised_prompt": data.get("revised_prompt", "") if isinstance(data, dict) else "",
             "mime_type": "image/png",
         }
 
     try:
         r = httpx.post(url, headers=_api_headers(api_key), json=body, timeout=timeout)
+
         if r.status_code == 422 and not is_openai:
-            # Backend rejected response_format — retry without it
             body.pop("response_format", None)
             r = httpx.post(url, headers=_api_headers(api_key), json=body, timeout=timeout)
+
         r.raise_for_status()
-        return _parse(r.json())
+
+        parsed = _parse(r.json())
+
+        # 🚨 FINAL SAFETY CHECK (this prevents your error message)
+        if not parsed.get("b64_json"):
+            raise RuntimeError(
+                "Bild konnte nicht gespeichert werden (kein Bild-Daten vom Server erhalten)"
+            )
+
+        return parsed
+
     except httpx.HTTPStatusError as e:
         detail = ""
         try:
@@ -664,6 +685,7 @@ def api_generate_image(
         except Exception:
             detail = e.response.text[:300]
         raise RuntimeError(f"OpenAI Image Generation Fehler ({e.response.status_code}): {detail}")
+
     except Exception as e:
         raise RuntimeError(f"OpenAI Image Generation nicht erreichbar: {e}")
 

@@ -3479,8 +3479,12 @@ def chat_round(
     # Pending Images injizieren (send_image/Bildgenerierung für Web/API)
     _pending_imgs = config.pop("_pending_images", [])
     if _pending_imgs:
-        _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
-        _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
+        _img_platform = (config.get("_chat_context") or {}).get("platform")
+        # Only inject markdown images for web/api clients
+        # Discord/Matrix send images directly via notify.py, not as markdown
+        if _img_platform in ("web", "api"):
+            _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
+            _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
 
     # Pending Audio injizieren (send_audio für Web/API)
     _pending_auds = config.pop("_pending_audio", [])
@@ -3882,8 +3886,12 @@ def chat_round_stream(
             # Pending Images injizieren
             _pending_imgs = config.pop("_pending_images", [])
             if _pending_imgs:
-                _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
-                _done_content = f"{_done_content}\n\n{_img_md}" if _done_content else _img_md
+                _img_platform = (config.get("_chat_context") or {}).get("platform")
+                # Only inject markdown images for web/api clients
+                # Discord/Matrix send images directly via notify.py, not as markdown
+                if _img_platform in ("web", "api"):
+                    _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
+                    _done_content = f"{_done_content}\n\n{_img_md}" if _done_content else _img_md
             # Pending Audio injizieren (send_audio für Web/API)
             _pending_auds = config.pop("_pending_audio", [])
             if _pending_auds:
@@ -4076,8 +4084,12 @@ def chat_round_stream(
     # da base64-Daten den LLM-Context sprengen würden).
     _pending_imgs = config.pop("_pending_images", [])
     if _pending_imgs:
-        _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
-        _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
+        _img_platform = (config.get("_chat_context") or {}).get("platform")
+        # Only inject markdown images for web/api clients
+        # Discord/Matrix send images directly via notify.py, not as markdown
+        if _img_platform in ("web", "api"):
+            _img_md = "\n\n".join(f"![{img['caption']}]({img['url']})" for img in _pending_imgs)
+            _final_content = f"{_final_content}\n\n{_img_md}" if _final_content else _img_md
 
     # Pending Audio injizieren (send_audio für Web/API)
     _pending_auds = config.pop("_pending_audio", [])
