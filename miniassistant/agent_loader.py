@@ -575,6 +575,11 @@ def _tools_section(config: dict[str, Any]) -> str:
                     sub_display.append(f"`{prefix}{alias}`")
         lines.append(
             "- `invoke_model`: Delegate tasks to subagents via `invoke_model(model='...', message='...')`.\n"
+            "  **When to use:** ONLY in these cases: (1) the user explicitly asks for a subagent/worker, "
+            "(2) the user names a specific subagent model, "
+            "(3) the task requires a specialized model (image generation, audio generation). "
+            "**NEVER delegate to a subagent on your own initiative** — if you can do the task with your own tools "
+            "(exec, web_search, read_url, etc.), do it yourself. Subagents cost extra time and resources.\n"
             "  **If the user names a specific subagent: ALWAYS use it — never do the work yourself instead.**\n"
             "  Message must be self-contained: goal, expected output format, language, relevant context, paths.\n"
             "  Tell the subagent to complete the full task and return the result (not a TODO list).\n"

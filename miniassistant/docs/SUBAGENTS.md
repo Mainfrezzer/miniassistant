@@ -27,6 +27,14 @@ Subagents have **limited tools** (injected at call time, no main-agent context c
 Subagent system prompt comes from `agent_dir/basic_rules/subagent.md` (user-editable).
 Max 15 tool rounds per subagent call. Must use trash instead of `rm -rf`.
 
+## When to use subagents
+
+**ONLY use `invoke_model` in these cases:**
+1. The user **explicitly asks** for a subagent/worker (e.g. "beauftrage einen Subworker", "lass das den qwen machen")
+2. The task **requires a specialized model** (image generation, audio generation)
+
+**NEVER delegate on your own initiative.** If you can do the task with your own tools (exec, web_search, read_url, etc.), do it yourself. Subagents cost extra time and resources — don't use them "just because they're available".
+
 ## User-directed delegation
 
 If the user explicitly names a subagent (e.g. "beauftrage qwen3-coder-max"), the main agent **must** use that subagent via `invoke_model`. It must never silently fall back to doing the work itself.
