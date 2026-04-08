@@ -963,9 +963,11 @@ async def chat_page(request: Request):
     #img-preview .img-thumb {{ position: relative; display: inline-block; }}
     #img-preview .img-thumb img {{ max-height: 80px; max-width: 120px; border-radius: 6px; border: 1px solid var(--border); object-fit: cover; }}
     #img-preview .img-thumb .img-remove {{ position: absolute; top: -6px; right: -6px; background: var(--danger); color: #fff; border: none; border-radius: 50%; width: 18px; height: 18px; font-size: 12px; line-height: 18px; text-align: center; cursor: pointer; padding: 0; }}
-    .msg .content img.chat-image, .msg .content .markdown img {{ max-width: min(100%, 520px); max-height: min(360px, 45vh); border-radius: 8px; margin: 0.4em 0; cursor: pointer; display: block; }}
+    .msg .content img.chat-image, .msg .content .markdown img {{ max-width: min(100%, 520px); max-height: min(360px, 45vh); border-radius: 8px; margin: 0.4em 0; cursor: zoom-in; display: block; }}
     .msg.msg-user .user-images {{ display: flex; gap: 0.4em; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 0.3em; }}
-    .msg.msg-user .user-images img {{ max-height: 80px; max-width: 120px; border-radius: 6px; object-fit: cover; cursor: pointer; }}
+    .msg.msg-user .user-images img {{ max-height: 80px; max-width: 120px; border-radius: 6px; object-fit: cover; cursor: zoom-in; }}
+    .chat-lightbox {{ position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:9999; display:flex; align-items:center; justify-content:center; cursor:zoom-out; }}
+    .chat-lightbox img {{ max-width:95vw; max-height:95vh; object-fit:contain; border-radius:8px; box-shadow:0 0 40px rgba(0,0,0,0.5); }}
     .chat-input.drag-over {{ border-color: var(--primary); background: rgba(59,130,246,0.05); }}
     .thinking-live {{ white-space: pre-wrap; font-size: 0.88em; color: var(--muted); margin: 0.3em 0; }}
     .typing-dots {{ display: inline-flex; align-items: center; gap: 0.2em; margin: 0.3em 0; color: var(--muted); font-size: 1.2em; }}
@@ -973,8 +975,11 @@ async def chat_page(request: Request):
     .typing-dots span:nth-child(2) {{ animation-delay: 0.15s; }}
     .typing-dots span:nth-child(3) {{ animation-delay: 0.3s; }}
     @keyframes typing-bounce {{ 0%, 80%, 100% {{ transform: scale(0.6); opacity: 0.5; }} 40% {{ transform: scale(1); opacity: 1; }} }}
-    .processing-indicator {{ display: inline-flex; align-items: center; gap: 0.4em; margin: 0.3em 0; color: var(--muted); font-size: 0.88em; animation: processing-pulse 1.5s ease-in-out infinite; }}
-    @keyframes processing-pulse {{ 0%, 100% {{ opacity: 0.5; }} 50% {{ opacity: 1; }} }}
+    .processing-indicator {{ display: inline-flex; align-items: center; gap: 0.4em; margin: 0.3em 0; color: var(--muted); font-size: 0.88em; }}
+    .processing-indicator .proc-dots {{ display: inline-flex; gap: 0.2em; align-items: center; }}
+    .processing-indicator .proc-dots span {{ width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: typing-bounce 0.6s ease-in-out infinite both; }}
+    .processing-indicator .proc-dots span:nth-child(2) {{ animation-delay: 0.15s; }}
+    .processing-indicator .proc-dots span:nth-child(3) {{ animation-delay: 0.3s; }}
     </style>
     </head>
     <body>
@@ -983,7 +988,7 @@ async def chat_page(request: Request):
       <img src="/static/miniassistant.png" alt="MiniAssistant">
       <h1>Chat</h1>
       <span id="track-badge" style="display:none;font-size:0.72em;background:var(--primary);color:#fff;padding:0.15em 0.5em;border-radius:10px;margin-left:0.2em">💾 wird gespeichert</span>
-      <span class="cmds">/model, /models, /new, /schedules, /schedule remove &lt;ID&gt;, /auth — oder mit : statt /</span>
+      <span class="cmds">/model, /models, /new, /abort, /stop, /schedules, /schedule remove &lt;ID&gt;, /auth — oder mit : statt /</span>
     </div>
     {"<div class=\"onboarding-notice\">Setup noch nicht abgeschlossen. <a href=\"/onboarding" + token_q + "\">Onboarding / Setup</a></div>" if show_onboarding else ""}
     <div id="log"></div>
@@ -1284,6 +1289,18 @@ async def chat_page(request: Request):
       log.scrollTop = log.scrollHeight;
       form.querySelector("button[type=submit]").disabled = false;
     }}
+    /* Lightbox: Klick auf Bilder im Chat → Vollbild */
+    log.addEventListener("click", function(e) {{
+      const img = e.target.closest(".markdown img, .chat-image, .user-images img");
+      if (!img || !img.src) return;
+      const overlay = document.createElement("div");
+      overlay.className = "chat-lightbox";
+      overlay.innerHTML = '<img src="' + img.src.replace(/"/g, "&quot;") + '">';
+      overlay.addEventListener("click", function() {{ overlay.remove(); }});
+      function onKey(ev) {{ if (ev.key === "Escape") {{ overlay.remove(); document.removeEventListener("keydown", onKey); }} }}
+      document.addEventListener("keydown", onKey);
+      document.body.appendChild(overlay);
+    }});
     form.addEventListener("submit", async (e) => {{
       e.preventDefault();
       const content = msgEl.value.trim();
@@ -1379,7 +1396,7 @@ async def chat_page(request: Request):
                   const container = document.getElementById("stream-container");
                   if (container) container.querySelector(".content").appendChild(pi);
                 }}
-                pi.textContent = "⚙ " + toolNames + " wird ausgefuehrt …";
+                pi.innerHTML = "⚙ " + toolNames + ' wird ausgefuehrt <span class="proc-dots"><span></span><span></span><span></span></span>';
                 log.scrollTop = log.scrollHeight;
               }}
               if (data.type === "status" && data.message) {{
@@ -1394,9 +1411,9 @@ async def chat_page(request: Request):
                   const container = document.getElementById("stream-container");
                   if (container) container.querySelector(".content").appendChild(pi);
                 }}
-                pi.textContent = "⚙ " + msg;
+                pi.innerHTML = "⚙ " + msg + ' <span class="proc-dots"><span></span><span></span><span></span></span>';
                 const thinkEl = document.getElementById("stream-thinking");
-                if (thinkEl) thinkEl.textContent += "\\n(" + msg + ")\\n";
+                if (thinkEl && !thinkEl.textContent.trimEnd().endsWith("(" + msg + ")")) thinkEl.textContent += "\\n(" + msg + ")\\n";
                 log.scrollTop = log.scrollHeight;
               }}
               if (data.type === "done") {{ doneData = data; }}
@@ -1753,7 +1770,7 @@ def _chat_stream_generator(session_id: str, session: dict, message: str, images:
     lock = _get_session_lock(session_id)
     if not lock.acquire(timeout=5.0):
         import json as _json
-        yield _json.dumps({"type": "done", "session_id": session_id, "content": "", "error": "Session wird bereits verwendet"}, ensure_ascii=False) + "\n"
+        yield _json.dumps({"type": "done", "session_id": session_id, "content": "", "error": "Modell arbeitet noch — warte bis die Antwort fertig ist, oder sende /abort zum Abbrechen."}, ensure_ascii=False) + "\n"
         return
     try:
         yield from _chat_stream_generator_locked(session_id, session, message, images=images)
@@ -1784,19 +1801,18 @@ def _chat_stream_generator_locked(session_id: str, session: dict, message: str, 
                         _msg["content"] = "[Bild angehängt] " + (_msg.get("content") or "")
             session["messages"] = _done_msgs
             _sessions[session_id] = session
-            # Memory: Exchange speichern (wie handle_user_input für Matrix/Discord)
+            # Memory + Chat-History: nur bei gespeicherten Chats (track=1)
             done_content = (ev.get("content") or "").strip()
-            if done_content and message.strip():
+            if done_content and message.strip() and session.get("_track_chat"):
                 try:
                     from miniassistant.memory import append_exchange
                     append_exchange(message, done_content, project_dir=session.get("project_dir"))
                 except Exception:
                     pass
-                if session.get("_track_chat"):
-                    try:
-                        _save_chat_to_file(session, message, done_content)
-                    except Exception:
-                        pass
+                try:
+                    _save_chat_to_file(session, message, done_content)
+                except Exception:
+                    pass
         yield _json.dumps(out, ensure_ascii=False) + "\n"
 
 
@@ -1863,10 +1879,23 @@ async def api_chat_stream(request: Request):
         if not _chat_images:
             _chat_images = None
 
+    # Abbruch-Befehle VOR dem Session-Lock abfangen (funktionieren auch während Model läuft)
+    _cmd_lower = message.strip().lower()
+    if _cmd_lower.startswith(":") and len(_cmd_lower) > 1 and not _cmd_lower[1:2].isspace():
+        _cmd_lower = "/" + _cmd_lower[1:]
+    if _cmd_lower in ("/abort", "/stop", "/abbruch"):
+        from miniassistant.cancellation import request_cancel
+        cancel_key = f"web:{session_id}"
+        level = "stop" if _cmd_lower == "/stop" else "abort"
+        request_cancel(cancel_key, level)
+        _log.info("Web: %s (session %s) — Cancellation angefordert (%s)", message, session_id, level)
+        import json as _json
+        reply = "⏹ Verarbeitung wird abgebrochen…" if level == "abort" else "⏸ Verarbeitung wird nach aktuellem Schritt gestoppt…"
+        one = _json.dumps({"type": "done", "session_id": session_id, "content": reply}, ensure_ascii=False) + "\n"
+        return StreamingResponse(iter([one]), media_type="application/x-ndjson")
+
     if is_chat_command(message) or body.get("model"):
-        _msg_lower = message.strip().lower()
-        if _msg_lower.startswith(":") and len(_msg_lower) > 1 and not _msg_lower[1:2].isspace():
-            _msg_lower = "/" + _msg_lower[1:]
+        _msg_lower = _cmd_lower
         is_new = _msg_lower == "/new"
         is_model_switch = _msg_lower.startswith("/model ") or body.get("model")
         # Run in threadpool to avoid blocking event loop during model pulls
@@ -2988,7 +3017,7 @@ async def workspace_page(request: Request):
 .ws-filename {{font-weight:600;margin-bottom:0.8rem;color:var(--primary);font-size:0.95rem;word-break:break-all}}
 .ws-sort-bar {{display:flex;align-items:center;gap:0.3rem;padding:0.3rem 0.5rem;background:var(--card);border:1px solid var(--border);border-top:none;font-size:0.75rem}}
 .ws-sort-bar select {{font-size:0.75rem;padding:0.15rem 0.3rem;border:1px solid var(--border);border-radius:3px;background:var(--bg);color:var(--text);cursor:pointer}}
-.ws-sort-bar button {{font-size:0.75rem;padding:0.15rem 0.4rem;border:1px solid var(--border);border-radius:3px;background:var(--bg);color:var(--text);cursor:pointer;line-height:1}}
+.ws-sort-bar button {{font-size:0.75rem;padding:0.15rem 0.4rem;border:1px solid var(--border);border-radius:3px;background:var(--bg);color:var(--text);cursor:pointer;line-height:1;white-space:nowrap}}
 .ws-sort-bar button:hover {{color:var(--primary);border-color:var(--primary)}}
 </style>
 <script src="/static/marked.umd.js"></script>
@@ -3054,8 +3083,9 @@ function wsUpdateSortUI() {{
 
 function wsSortChanged() {{
   var by = document.getElementById('ws-sort-by').value;
-  var s = wsGetSort();
-  wsSetSort(by, s.dir);
+  // Datum → neueste zuerst (desc), Name → A-Z (asc)
+  var dir = (by === 'date') ? 'desc' : 'asc';
+  wsSetSort(by, dir);
   wsUpdateSortUI();
   wsRefreshTree();
 }}

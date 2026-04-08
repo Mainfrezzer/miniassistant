@@ -49,6 +49,21 @@ invoke_model(model='EXACT_NAME_FROM_LIST', message='make the sky sunset orange',
 
 **Only pass `strength` when the user explicitly asks for subtle/strong changes.** Do NOT invent default values.
 
+## Parameter synonyms — what the user means
+
+Users often use informal or German words for technical parameters. Map them correctly:
+
+| User says | Parameter | Example |
+|-----------|-----------|---------|
+| "10 Durchläufe", "10 Schritte", "10 steps", "10 iterations" | `steps=10` | `invoke_model(..., steps=10)` |
+| "1024x900", "in 1024x900", "Größe 1024x900" | `size="1024x900"` | `invoke_model(..., size='1024x900')` |
+| "CFG 7", "Guidance 7", "CFG-Scale 7" | `cfg_scale=7` | `invoke_model(..., cfg_scale=7)` |
+| "Seed 42", "gleicher Seed" | `seed=42` | `invoke_model(..., seed=42)` |
+| "Stärke 0.5", "strength 0.5", "leicht verändern" | `strength=0.5` | `invoke_model(..., strength=0.5)` |
+| "ohne Hintergrund", "kein Text" | `negative_prompt="background, text"` | `invoke_model(..., negative_prompt='...')` |
+
+**CRITICAL:** These are **parameters of a single `invoke_model` call** — NOT separate calls. "10 Durchläufe" means `steps=10` in ONE call, NOT 10 separate image generations.
+
 ### How to decide: Generate vs Edit
 
 | User says | Action |

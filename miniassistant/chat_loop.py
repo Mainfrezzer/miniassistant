@@ -3934,7 +3934,10 @@ def chat_round_stream(
                     nudge_tool_calls = _extract_tool_calls(nudge_msg)
                     if nudge_tool_calls:
                         _log.info("Stream nudge enthält %d Tool-Call(s) — führe aus", len(nudge_tool_calls))
-                        yield {"type": "tool_call", "tools": [n for n, _ in nudge_tool_calls]}
+                        yield {"type": "tool_call", "tools": [
+                            f"{n}({a.get('model', '')})" if n == "invoke_model" and a.get("model") else n
+                            for n, a in nudge_tool_calls
+                        ]}
                         _nudge_hist = nudge_msg.get("content") or nudge_msg.get("thinking") or ""
                         msgs.append({"role": "assistant", "content": _nudge_hist, "thinking": nudge_msg.get("thinking") or "", "tool_calls": nudge_resp.get("message", {}).get("tool_calls") or []})
                         nudge_results = _run_tools_maybe_concurrent(nudge_tool_calls, config, project_dir)
@@ -4014,7 +4017,10 @@ def chat_round_stream(
             yield {"type": "done", "thinking": _done_thinking, "content": _done_content, "images": _pending_imgs, "audio": _pending_auds, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _done_tps, "ctx": [_ctx_used, _ctx_max]}
             return
 
-        _tool_names = [n for n, _ in tool_calls]
+        _tool_names = [
+            f"{n}({a.get('model', '')})" if n == "invoke_model" and a.get("model") else n
+            for n, a in tool_calls
+        ]
         yield {"type": "tool_call", "tools": _tool_names}
         # Wenn Tool-Calls aus Thinking extrahiert und Content leer: Thinking als Content
         _hist_s_content = history_content or full_msg.get("content") or ""

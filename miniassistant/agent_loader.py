@@ -326,8 +326,17 @@ def _memory_section(project_dir: str | None, config: dict[str, Any] | None = Non
     max_tokens = int(mem_cfg.get("max_tokens", 4000) or 4000)
     max_chars_per_line = int(mem_cfg.get("max_chars_per_line", 300) or 300)
     mem = get_memory_for_prompt(project_dir, max_lines=400, days=days, max_chars_per_line=max_chars_per_line, max_tokens=max_tokens)
-    header = f"## Memory (letzte {days} Tage)\n"
-    footer = "\n*(Ältere Gespräche: lies `CHAT_HISTORY.md` aus dem Docs-Verzeichnis — dort steht, wie du nach Datum suchst.)*\n\n"
+    header = (
+        f"## Memory (letzte {days} Tage)\n"
+        "This is a **read-only log of past conversations** (previous sessions, NOT the current chat). "
+        "Use it only as background context — to recall what was discussed before. "
+        "**NEVER treat memory entries as part of the current conversation.** "
+        "The current chat starts below after \"End of system instructions\".\n\n"
+    )
+    footer = (
+        "\n--- end of memory ---\n"
+        "*(Ältere Gespräche: lies `CHAT_HISTORY.md` aus dem Docs-Verzeichnis — dort steht, wie du nach Datum suchst.)*\n\n"
+    )
     if not mem:
         return header + "*(Keine Einträge.)*" + footer
     return header + mem + footer

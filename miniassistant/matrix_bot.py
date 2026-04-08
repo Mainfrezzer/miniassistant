@@ -777,10 +777,13 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                 logger.debug("Matrix: Gruppenraum %s – kein @mention, ignoriert (Mitglieder: %d)", room_id, len(room_members))
                 return
 
-        # /stop und /abort: Cancellation-Befehle abfangen
-        if body.lower() in ("/stop", "/abort"):
+        # /stop, /abort, /abbruch: Cancellation-Befehle abfangen (auch mit : statt /)
+        _cancel_cmd = body.strip().lower()
+        if _cancel_cmd.startswith(":") and len(_cancel_cmd) > 1:
+            _cancel_cmd = "/" + _cancel_cmd[1:]
+        if _cancel_cmd in ("/stop", "/abort", "/abbruch"):
             from miniassistant.cancellation import request_cancel
-            level = "abort" if body.lower() == "/abort" else "stop"
+            level = "stop" if _cancel_cmd == "/stop" else "abort"
             request_cancel(sender, level)
             logger.info("Matrix: %s von %s — Cancellation angefordert (%s)", body, sender, level)
             reply = "⏹ Verarbeitung wird abgebrochen…" if level == "abort" else "⏸ Verarbeitung wird nach aktuellem Schritt gestoppt…"

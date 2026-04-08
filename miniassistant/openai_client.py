@@ -583,7 +583,7 @@ def api_generate_image(
     size: str = "1024x1024",
     quality: str = "standard",
     base_url: str = OPENAI_API_URL,
-    timeout: int = 600,
+    timeout: int = 1200,
     steps: int | None = None,
     cfg_scale: float | None = None,
     guidance: float | None = None,
@@ -714,7 +714,7 @@ def api_edit_image(
     model: str = "dall-e-2",
     size: str = "1024x1024",
     base_url: str = OPENAI_API_URL,
-    timeout: int = 600,
+    timeout: int = 1200,
     mask_path: str | None = None,
     steps: int | None = None,
     cfg_scale: float | None = None,
@@ -856,9 +856,11 @@ def api_edit_image(
 
     # Default: OpenAI-kompatibel (/v1/images/edits multipart)
     # Bei lokalen Backends: Fallback auf A1111 wenn /edits fehlschlägt
+    first_err = None
     try:
         return _try_openai_edits()
     except Exception as _edit_err:
+        first_err = _edit_err
         if is_openai:
             raise RuntimeError(f"OpenAI Image Edit Fehler: {_edit_err}")
         _log.info("/v1/images/edits failed (%s), trying /sdapi/v1/img2img fallback", _edit_err)
@@ -866,7 +868,7 @@ def api_edit_image(
     try:
         return _try_a1111_img2img()
     except Exception as _a1111_err:
-        raise RuntimeError(f"Image Edit fehlgeschlagen — /v1/images/edits: {_edit_err} | /sdapi/v1/img2img: {_a1111_err}")
+        raise RuntimeError(f"Image Edit fehlgeschlagen — /v1/images/edits: {first_err} | /sdapi/v1/img2img: {_a1111_err}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
