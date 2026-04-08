@@ -3161,9 +3161,10 @@ function wsRefresh() {{
   else {{ wsLoadTree(WS_CURRENT_PATH); }}
 }}
 
-function wsLoadTree(path) {{
+function wsLoadTree(path, keepScroll) {{
   WS_CURRENT_PATH = path || '';
   var tree = document.getElementById('ws-tree');
+  var savedScroll = keepScroll ? tree.scrollTop : 0;
   tree.innerHTML = '<div class="ws-empty">Lade...</div>';
   fetch(wsApiUrl('files', {{path: WS_CURRENT_PATH}}))
     .then(function(r) {{ return r.json(); }})
@@ -3203,6 +3204,7 @@ function wsLoadTree(path) {{
       tree.querySelectorAll('button[data-delete]').forEach(function(btn) {{
         btn.addEventListener('click', function(e) {{ e.stopPropagation(); wsDeleteFile(btn.getAttribute('data-delete')); }});
       }});
+      if (savedScroll) tree.scrollTop = savedScroll;
     }})
     .catch(function(err) {{ tree.innerHTML = '<div class="ws-empty">Fehler: ' + wsEscape(String(err)) + '</div>'; }});
 }}
@@ -3237,7 +3239,7 @@ function wsDeleteFile(path) {{
     .then(function(r) {{ return r.json(); }})
     .then(function(data) {{
       if (data.error) {{ alert(data.error); return; }}
-      wsLoadTree(WS_CURRENT_PATH);
+      wsLoadTree(WS_CURRENT_PATH, true);
       document.getElementById('ws-viewer').innerHTML = '<div class="ws-empty">Datei in Papierkorb verschoben</div>';
     }})
     .catch(function(err) {{ alert('Fehler: ' + err); }});
