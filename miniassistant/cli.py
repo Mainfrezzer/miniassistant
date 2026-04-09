@@ -563,6 +563,17 @@ def serve(ctx: click.Context, host: str | None, port: int | None) -> None:
     # Projektverzeichnis für Sessions (Config/Memory/Agent aus diesem Ordner bei -C)
     app.state.project_dir = ctx.obj.get("project_dir")
     import uvicorn
+    # miniassistant.* Logger auf Konsole (uvicorn konfiguriert nur seine eigenen Logger)
+    _ma_root = logging.getLogger("miniassistant")
+    if not _ma_root.handlers:
+        class _UviStyleFmt(logging.Formatter):
+            def format(self, record):
+                prefix = f"{record.levelname}:"
+                return f"{prefix:<10}{record.name}: {record.getMessage()}"
+        _sh = logging.StreamHandler()
+        _sh.setFormatter(_UviStyleFmt())
+        _ma_root.addHandler(_sh)
+    _ma_root.setLevel(logging.INFO)
     # Log-Polling von /api/logs/ aus dem Access-Log filtern (Noise bei Live-Log-Viewer)
     class _LogPollFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:

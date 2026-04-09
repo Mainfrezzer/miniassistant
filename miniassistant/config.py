@@ -603,6 +603,14 @@ def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
             "rate_limit": int((data.get("raw_proxy") or {}).get("rate_limit", 100) or 100),
             "allowed_models": list((data.get("raw_proxy") or {}).get("allowed_models") or []),
         },
+        "mempalace": {
+            "enabled": bool((data.get("mempalace") or {}).get("enabled", False)),
+            "wing": (data.get("mempalace") or {}).get("wing", "miniassistant"),
+            "default_room": (data.get("mempalace") or {}).get("default_room", "conversations"),
+            "max_tokens": int((data.get("mempalace") or {}).get("max_tokens", 900) or 900),
+            "palace_path": (data.get("mempalace") or {}).get("palace_path", ""),
+            "identity_path": (data.get("mempalace") or {}).get("identity_path", ""),
+        },
     }
 
 

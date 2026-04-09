@@ -92,9 +92,26 @@ chat_clients:
     bot_token: "discord-bot-token"
 
 memory:
-  max_chars_per_line: 300
-  days: 2
-  max_tokens: 4000                         # Token-Budget für Memory im System-Prompt
+  max_chars_per_line: 300                    # Nur Fallback — wird NICHT genutzt wenn mempalace.enabled: true
+  days: 2                                    # Nur Fallback — wird NICHT genutzt wenn mempalace.enabled: true
+  max_tokens: 4000                           # Nur Fallback — wird NICHT genutzt wenn mempalace.enabled: true
+
+# mempalace — AI Memory mit semantischer Suche (optional, spart ~3500 Tokens)
+# Voraussetzung: pip install 'miniassistant[mempalace]'
+# Wenn aktiviert:
+#   - System-Prompt nutzt L0 (Identity) + L1 (Top Moments) statt raw dump → ~200 statt ~4500 Tokens
+#   - Exchanges werden parallel in ChromaDB-Drawers gespeichert (+ tägliche .md als Backup)
+#   - LLM bekommt `search_memory` Tool für semantische Suche in vergangenen Gesprächen
+#   - memory.days/max_tokens/max_chars_per_line werden NICHT mehr benutzt (nur Fallback)
+# Daten liegen LOKAL unter agent_dir/mempalace/ — es wird NICHTS an externe Server gesendet.
+# ChromaDB-Telemetrie ist explizit deaktiviert (ANONYMIZED_TELEMETRY=False).
+mempalace:
+  enabled: false                             # true = mempalace aktivieren (erstellt Palace beim ersten Start automatisch)
+  wing: miniassistant                        # Wing-Name für gespeicherte Gespräche
+  default_room: conversations                # Default-Room für neue Exchanges
+  max_tokens: 900                            # Token-Budget für L0+L1 im System-Prompt (~500-900)
+  # palace_path: ~/.config/miniassistant/agent/mempalace/palace  # Default: agent_dir/mempalace/palace
+  # identity_path: ~/.config/miniassistant/agent/mempalace/identity.txt  # L0 Identity-Datei
 
 chat:
   context_quota: 0.85                      # Anteil von num_ctx der genutzt wird (0.5–0.95). Bei Überschreitung: Smart Compacting

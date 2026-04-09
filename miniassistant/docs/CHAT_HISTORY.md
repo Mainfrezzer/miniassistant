@@ -1,11 +1,11 @@
-# Chat History / Conversation Memory
+# Chat History — File-Based Memory
 
 All conversations are automatically saved to daily memory files.
 
 ## Location
-`/root/.config/miniassistant/agent/memory/YYYY-MM-DD.md`
+`{agent_dir}/memory/YYYY-MM-DD.md`
 
-Each file contains all conversations from that day, in the format:
+Each file contains all conversations from that day:
 ```
 User: [message]
 Assistant: [reply]
@@ -18,20 +18,25 @@ Assistant: [reply]
 
 **The last 2 days** are already loaded in your system prompt (memory section above).
 
-**For older conversations**, read the file directly:
+**For older conversations**, read the file — always limit output:
 ```
-exec: cat /root/.config/miniassistant/agent/memory/2026-03-10.md
+exec: head -100 {agent_dir}/memory/2026-03-10.md
 ```
 
 Search by topic across multiple days:
 ```
-exec: grep -i "code editor" /root/.config/miniassistant/agent/memory/*.md
+exec: grep -i "code editor" {agent_dir}/memory/*.md
 ```
 
 List available days:
 ```
-exec: ls /root/.config/miniassistant/agent/memory/
+exec: ls {agent_dir}/memory/
 ```
+
+**IMPORTANT — output limits:**
+- NEVER `cat` a full memory file — always use `head -100` or `tail -100`
+- If you need more lines, read the next chunk: `sed -n '101,200p' FILE`
+- Check total length first: `wc -l FILE`
 
 ## Resolving relative date references
 
@@ -45,11 +50,11 @@ Mo=0, Di=1, Mi=2, Do=3, Fr=4, Sa=5, So=6
 
 Example: today is Sunday (So) 15.03.2026
 - "diesen Dienstag" → last Tuesday before Sunday = 15 - 5 = **10.03.2026**
-→ read `/root/.config/miniassistant/agent/memory/2026-03-10.md`
+→ read `{agent_dir}/memory/2026-03-10.md`
 
 ## Summarizing a past conversation
 
 1. Resolve the date using today's date
-2. Read the memory file for that day
+2. Read the memory file for that day (first 100 lines)
 3. Find the relevant conversation by searching for keywords
 4. Summarize and write to workspace if asked

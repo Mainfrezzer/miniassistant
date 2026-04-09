@@ -11,11 +11,13 @@ set -e
 INSTALL_DIR="."
 INIT_INSTALL=""
 SYSTEMD_INSTALL=""
+MIGRATE_MEMPALACE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --init)     INIT_INSTALL=1 ;;
-    --systemd)  SYSTEMD_INSTALL=1 ;;
-    *)          INSTALL_DIR="$1" ;;
+    --init)               INIT_INSTALL=1 ;;
+    --systemd)            SYSTEMD_INSTALL=1 ;;
+    --migrate-mempalace)  MIGRATE_MEMPALACE=1 ;;
+    *)                    INSTALL_DIR="$1" ;;
   esac
   shift
 done
@@ -132,7 +134,7 @@ fi
 # Abhängigkeiten (aus pyproject.toml inkl. optionale Extras: matrix, discord, scheduler)
 echo "Installiere Abhängigkeiten..."
 "$VENV_DIR/bin/python3" -m pip install -q --upgrade pip
-"$VENV_DIR/bin/python3" -m pip install -q -e '.[matrix,discord,scheduler]'
+"$VENV_DIR/bin/python3" -m pip install -q -e '.[matrix,discord,scheduler,mempalace]'
 
 # Kurz prüfen, ob matrix-nio im selben venv importierbar ist (für Matrix-Bot)
 if ! "$VENV_DIR/bin/python3" -c "import nio" 2>/dev/null; then
@@ -142,6 +144,15 @@ fi
 # Discord prüfen
 if ! "$VENV_DIR/bin/python3" -c "import discord" 2>/dev/null; then
   echo "Hinweis: discord.py konnte nicht geladen werden. Erneut: $VENV_DIR/bin/python3 -m pip install -e '.[discord]'"
+fi
+# mempalace + ChromaDB prüfen (semantisches Gedächtnis)
+if "$VENV_DIR/bin/python3" -c "import mempalace; import chromadb" 2>/dev/null; then
+  MP_VER=$("$VENV_DIR/bin/python3" -c "import mempalace; print(getattr(mempalace, '__version__', mempalace.version.__version__ if hasattr(mempalace, 'version') else '?'))" 2>/dev/null || echo "?")
+  echo "  mempalace $MP_VER + ChromaDB verfügbar."
+else
+  echo "Hinweis: mempalace oder ChromaDB konnte nicht geladen werden. Erneut:"
+  echo "  $VENV_DIR/bin/python3 -m pip install -e '.[mempalace]'"
+  echo "  Falls ChromaDB Probleme macht: $VENV_DIR/bin/python3 -m pip install 'chromadb>=0.5,<0.7'"
 fi
 # Matrix-E2EE (Entschlüsselung): pip install matrix-nio[e2e] – braucht libolm, cmake, make (s. o. System-Pakete)
 E2EE_OK=0
@@ -161,6 +172,55 @@ if "$VENV_DIR/bin/python3" -c "import nio" 2>/dev/null; then
   fi
 fi
 
+# --- mempalace Migration: bestehende Memory-Dateien in Palace importieren ---
+if [ -n "$MIGRATE_MEMPALACE" ]; then
+  echo ""
+  echo "mempalace Migration: Prüfe Voraussetzungen..."
+  if ! "$VENV_DIR/bin/python3" -c "import chromadb; import mempalace" 2>/dev/null; then
+    echo "  Fehler: mempalace oder ChromaDB nicht installiert." >&2
+    echo "  Bitte zuerst ./install.sh ohne --migrate-mempalace ausführen." >&2
+  else
+    echo "  mempalace + ChromaDB verfügbar."
+    echo "  Initialisiere Palace und importiere bestehende Memory-Dateien..."
+    echo "  (Das kann bei vielen Dateien 2-5 Minuten dauern.)"
+    "$VENV_DIR/bin/python3" -c "
+import os, sys
+os.environ['ANONYMIZED_TELEMETRY'] = 'False'
+try:
+    from miniassistant.config import load_config
+    cfg = load_config()
+    mp = cfg.get('mempalace') or {}
+    if not mp.get('enabled', False):
+        print('  mempalace ist in der Config nicht aktiviert.')
+        print('  Bitte zuerst in config.yaml setzen:')
+        print('    mempalace:')
+        print('      enabled: true')
+        sys.exit(0)
+    from miniassistant.memory import init_mempalace, import_existing_memories
+    palace_path = init_mempalace()
+    print(f'  Palace erstellt: {palace_path}')
+    stats = import_existing_memories(palace_path=palace_path)
+    print(f'  Import abgeschlossen:')
+    print(f'    Dateien:          {stats[\"files\"]}')
+    print(f'    Importiert:       {stats[\"imported\"]}')
+    print(f'    Noise gefiltert:  {stats[\"skipped_noise\"]}')
+    print(f'    Bereits vorhanden:{stats[\"skipped_existing\"]}')
+    # Marker setzen
+    from pathlib import Path
+    (Path(palace_path) / '.memory_imported').write_text(
+        f'imported={stats[\"imported\"]} files={stats[\"files\"]} noise={stats[\"skipped_noise\"]}\n'
+    )
+    print('  Marker .memory_imported gesetzt — kein erneuter Import beim Start.')
+except Exception as e:
+    print(f'  Fehler bei Migration: {e}', file=sys.stderr)
+    sys.exit(1)
+"
+    if [ $? -eq 0 ]; then
+      echo "  mempalace Migration erfolgreich abgeschlossen."
+    fi
+  fi
+fi
+
 echo ""
 echo "Installation abgeschlossen. Aktivieren: source ${VENV_DIR}/bin/activate"
 echo "Dann: miniassistant config   (Konfiguration / Ersteinrichtung)"
@@ -172,6 +232,14 @@ echo ""
 echo "Optional: JS-Rendering (Playwright) für JavaScript-lastige Seiten (SPAs, React/Vue/Angular):"
 echo "  $VENV_DIR/bin/python3 -m pip install 'miniassistant[js]'"
 echo "  $VENV_DIR/bin/playwright install chromium   (~300 MB)"
+echo ""
+echo "mempalace (AI Memory mit semantischer Suche) wurde mitinstalliert."
+echo "  Aktivieren in config.yaml:"
+echo "    mempalace:"
+echo "      enabled: true"
+echo "  Palace wird automatisch beim Service-Start erstellt."
+echo "  Bestehende Memory-Dateien importieren: ./install.sh --migrate-mempalace"
+echo "  Spart ~3500 Tokens im System-Prompt (L0+L1 statt raw dump)."
 echo ""
 echo "Hinweis Emoji im CLI-Chat: fonts-noto-color-emoji wurde installiert."
 echo "  Für korrekte Darstellung wird ein modernes Terminal empfohlen"

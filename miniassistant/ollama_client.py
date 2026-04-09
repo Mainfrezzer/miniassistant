@@ -496,6 +496,35 @@ def _tools_schema(
             },
         },
     })
+    # search_memory: nur wenn mempalace aktiviert
+    mp_cfg = config.get("mempalace") or {}
+    if mp_cfg.get("enabled", False):
+        _mp_wing = mp_cfg.get("wing", "miniassistant")
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "search_memory",
+                "description": (
+                    "Search past conversations and stored knowledge semantically. "
+                    "MANDATORY: You MUST call this tool BEFORE answering whenever the user asks about past conversations, "
+                    "previous topics, or anything they discussed before (e.g. 'remember when we talked about...', "
+                    "'did we discuss...', 'what was that thing about...'). NEVER guess or hallucinate past conversations — "
+                    "always search first. "
+                    f"Default wing: '{_mp_wing}'. Omit wing/room for broad search."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural language search query (e.g. 'DGX Spark specs', 'VPN setup discussion')"},
+                        "wing": {"type": "string", "description": f"Filter by wing/project (default: '{_mp_wing}'). Omit for default."},
+                        "room": {"type": "string", "description": "Filter by room/topic (e.g. 'conversations', 'technical'). Omit for all rooms."},
+                        "n_results": {"type": "integer", "description": "Number of results (default: 5, max: 10)"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        })
+
     # Email tools: nur anzeigen wenn konfiguriert
     from miniassistant.tools import _get_email_account_names
     _email_accounts = _get_email_account_names(config)

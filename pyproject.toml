@@ -44,6 +44,8 @@ voice = []
 browser = ["curl_cffi>=0.7"]
 # js: Playwright für JavaScript-lastige Seiten (SPAs, React/Vue/Angular); lädt ~300MB Chromium
 js = ["playwright>=1.40"]
+# mempalace: AI memory system with semantic search (ChromaDB vector store, knowledge graph)
+mempalace = ["mempalace>=3.0"]
 
 [project.scripts]
 miniassistant = "miniassistant.cli:main"

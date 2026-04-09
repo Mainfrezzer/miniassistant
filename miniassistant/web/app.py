@@ -2730,7 +2730,7 @@ async def nutzung_page(request: Request):
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Nutzung – MiniAssistant</title>
     <link rel="icon" href="/favicon.ico">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <script src="/static/chart.umd.min.js"></script>
     <style>
     {_COMMON_CSS}
     .usage-wrap {{ max-width: 1100px; margin: 0 auto; padding: 1em; }}

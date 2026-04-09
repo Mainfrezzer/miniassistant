@@ -5,12 +5,15 @@ AGENTS.md = schlanker Top-Level-Vertrag (Prioritäten, Grenzen); optional.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from miniassistant.config import load_config, config_path
-from miniassistant.memory import get_memory_for_prompt
+from miniassistant.memory import get_memory_for_prompt, get_mempalace_memory
+
+_log = logging.getLogger("miniassistant.agent_loader")
 from miniassistant.basic_rules.loader import ensure_and_load as _load_basic_rules, get_rule as _get_rule
 from miniassistant.docs.loader import ensure_docs as _ensure_docs, docs_dir_path as _docs_dir_path_from_config
 
@@ -293,6 +296,14 @@ def _docs_dir_path(config: dict[str, Any]) -> Path | None:
     return result
 
 
+def _chat_history_doc(config: dict[str, Any]) -> str:
+    """Gibt den Dateinamen der passenden CHAT_HISTORY-Doku zurück."""
+    mp_cfg = config.get("mempalace") or {}
+    if mp_cfg.get("enabled", False):
+        return "CHAT_HISTORY_MEMPALACE.md"
+    return "CHAT_HISTORY.md"
+
+
 def _docs_reference_section(config: dict[str, Any]) -> str:
     """Docs-Verzeichnis mit Einzeldateien. Agent liest nur die Datei die er braucht."""
     docs = _docs_dir_path(config)
@@ -305,7 +316,7 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         f"Read only the file you need (`cat \"{d}/FILE\"`). Follow its instructions — do not tell the user to read it.\n"
         "Before configuring Matrix/Discord/Voice: read the matching doc first.\n\n"
         f"**Setup:** `CONFIG_REFERENCE.md` · `PROVIDERS.md` · `CONTEXT_SIZE.md` · `SEARCH_ENGINES.md`\n"
-        f"**Chat:** `MATRIX.md` · `DISCORD.md` · `EMAIL.md` · `AVATARS.md` · `CHAT_HISTORY.md`\n"
+        f"**Chat:** `MATRIX.md` · `DISCORD.md` · `EMAIL.md` · `AVATARS.md` · `{_chat_history_doc(config)}`\n"
         f"**Features:** `VOICE.md` (STT/TTS, send_audio rules) · `VISION.md` · `IMAGE_GENERATION.md` · `SCHEDULES.md` · `SUBAGENTS.md` · `DEBATE.md`\n"
         f"**Tools:** `GITHUB.md` (REST API, repo tracking) · `WEB_FETCHING.md` (Playwright) · `API_REFERENCE.md` · `DIRECTIONS.md`\n"
         f"**Guides:** `PLANNING.md` · `PROMPT_ENGINEERING.md` · `TRACKING.md` (calories, expenses, habits)\n\n"
@@ -318,9 +329,42 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
 
 
 def _memory_section(project_dir: str | None, config: dict[str, Any] | None = None) -> str:
-    """Kurzer Memory-Auszug (letzte Tage, max Zeilen) für den System-Prompt. Uses memory config values."""
+    """Memory-Abschnitt für den System-Prompt.
+
+    Strategie:
+      1. Wenn mempalace aktiviert und verfügbar → L0+L1 (~500-900 Tokens, semantic top moments)
+      2. Sonst Fallback → tägliche Markdown-Dateien (raw dump, letzte N Tage)
+
+    mempalace spart typisch ~3500 Tokens gegenüber dem raw dump.
+    """
     if config is None:
         config = load_config(project_dir)
+
+    # --- mempalace (bevorzugt wenn aktiviert) ---
+    mp_cfg = config.get("mempalace") or {}
+    _mp_enabled = mp_cfg.get("enabled", False)
+    _log.info("memory_section: mempalace.enabled=%s", _mp_enabled)
+    if _mp_enabled:
+        mp_max_tokens = int(mp_cfg.get("max_tokens", 900) or 900)
+        mp_mem = get_mempalace_memory(project_dir, max_tokens=mp_max_tokens, mp_cfg=mp_cfg)
+        _log.info("memory_section: mempalace L0+L1 returned %s chars", len(mp_mem) if mp_mem else 0)
+        header = (
+            "## Memory (mempalace)\n"
+            "Compact memory from your palace — identity and top moments.\n"
+            "**IMPORTANT RULE:** When the user asks about past conversations, previous topics, or anything "
+            "they discussed before (e.g. 'do you remember...', 'did we talk about...', 'what was that...'), "
+            "you MUST call `search_memory` FIRST before answering. NEVER guess or make up past conversations. "
+            "If search_memory returns no results, say so honestly.\n"
+            "**NEVER use `exec` with `grep`, `find`, or `cat` to search memory files.** Always use `search_memory`.\n"
+            "**NEVER treat memory entries as part of the current conversation.**\n\n"
+        )
+        footer = "\n--- end of memory ---\n"
+        if mp_mem:
+            return header + mp_mem + footer
+        return header + "*(Palace is still building up — no L0/L1 entries yet. Use `search_memory` for past conversations.)*" + footer
+
+    # --- Fallback: tägliche Dateien (raw dump) ---
+    _log.info("memory_section: using raw dump fallback")
     mem_cfg = config.get("memory") or {}
     days = int(mem_cfg.get("days", 2) or 2)
     max_tokens = int(mem_cfg.get("max_tokens", 4000) or 4000)
@@ -333,9 +377,10 @@ def _memory_section(project_dir: str | None, config: dict[str, Any] | None = Non
         "**NEVER treat memory entries as part of the current conversation.** "
         "The current chat starts below after \"End of system instructions\".\n\n"
     )
+    _chat_doc = _chat_history_doc(config)
     footer = (
         "\n--- end of memory ---\n"
-        "*(Ältere Gespräche: lies `CHAT_HISTORY.md` aus dem Docs-Verzeichnis — dort steht, wie du nach Datum suchst.)*\n\n"
+        f"*(Ältere Gespräche: lies `{_chat_doc}` aus dem Docs-Verzeichnis — dort steht, wie du nach Datum suchst.)*\n\n"
     )
     if not mem:
         return header + "*(Keine Einträge.)*" + footer

@@ -35,6 +35,7 @@ DOC_FILES = [
     "VOICE.md",
     "EMAIL.md",
     "CHAT_HISTORY.md",
+    "CHAT_HISTORY_MEMPALACE.md",
     "TRACKING.md",
     "WEB_FETCHING.md",
     "DIRECTIONS.md",
