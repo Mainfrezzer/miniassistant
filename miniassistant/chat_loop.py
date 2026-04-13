@@ -4894,7 +4894,10 @@ def create_session(config: dict[str, Any] | None = None, project_dir: str | None
     if config is None:
         config = load_config(project_dir)
     model = resolve_model(config, None)
-    system_prompt = build_system_prompt(config, project_dir)
+    # Extract user_id from chat_context
+    chat_ctx = config.get("_chat_context") or {}
+    user_id = chat_ctx.get("user_id")
+    system_prompt = build_system_prompt(config, project_dir, user_id=user_id)
     return {
         "config": config,
         "project_dir": project_dir,
@@ -4959,7 +4962,10 @@ def handle_user_input(
             return f"Modell `{resolved}` nicht bei Ollama gefunden. Konfiguriert: {avail_str}. Wechsel abgebrochen.", session, None, None, None, None
         old_model = session.get("model") or ""
         session["model"] = resolved
-        session["system_prompt"] = build_system_prompt(config, project_dir)
+        # Extract user_id from chat_context
+        chat_ctx = config.get("_chat_context") or {}
+        user_id = chat_ctx.get("user_id")
+        session["system_prompt"] = build_system_prompt(config, project_dir, user_id=user_id)
         session["messages"] = []  # neuer „Sprecher“ → Verlauf löschen, wie bei /new
         try:
             content, thinking, _msgs, _debug, _switch = chat_round(
@@ -4993,6 +4999,9 @@ def handle_user_input(
     if raw.lower() in ("/new", "/neu") and not allow_new_session:
         return "", session, None, None, None, None
     if raw.lower() in ("/new", "/neu"):
+        # Preserve chat_context (with user_id) when creating new session
+        if "chat_context" in session:
+            config["_chat_context"] = session["chat_context"]
         # create_session runs agent_loader (build_system_prompt) first, then we warmup with one prompt
         new_session = create_session(config, project_dir)
         new_session["model"] = session.get("model") or new_session.get("model")
@@ -5117,7 +5126,13 @@ def handle_user_input(
     # Memory + mempalace: Web/API nur mit explizitem Speichern (_track_chat), sonst nichts persistieren
     if _should_append_exchange_to_memory(session, config):
         try:
-            append_exchange(rest, content or "", project_dir=project_dir)
+            # Only save user_id if track_user_id is enabled in config. Extract user_id from chat_context if available (for Discord/Matrix user tracking)
+            track_user_id = config.get("memory", {}).get("track_user_id", False)
+            user_id = None
+            if track_user_id:
+                chat_ctx = session.get("chat_context") or {}
+                user_id = chat_ctx.get("user_id")
+            append_exchange(rest, content or "", project_dir=project_dir, user_id=user_id)
         except Exception:
             pass
 

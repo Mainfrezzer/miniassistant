@@ -774,6 +774,7 @@ def _voice_section(config: dict[str, Any]) -> str:
 def build_system_prompt(
     config: dict[str, Any] | None = None,
     project_dir: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Baut den kompletten System-Prompt aus Config, Agent-Dateien, Runtime und Tools.
     Grobe Token-Abschätzung (ohne Chatverlauf ~50 Tokens weniger): mit Standard max_chars_per_file=500
@@ -781,6 +782,10 @@ def build_system_prompt(
     1000–1400 Tokens (≈ 3,5 Zeichen/Token). Der Abschnitt Chatverlauf addiert nur ~35 Tokens."""
     if config is None:
         config = load_config(project_dir)
+    # user_id aus chat_context extrahieren (falls nicht explizit übergeben)
+    if user_id is None and config:
+        chat_ctx = config.get("_chat_context") or {}
+        user_id = chat_ctx.get("user_id")
     # basic_rules laden (kopiert Defaults nach agent_dir/basic_rules/ falls nötig, cached im RAM)
     _load_basic_rules(config)
     # docs kopieren (kopiert Defaults nach agent_dir/docs/ falls nötig); Ergebnis direkt als Cache setzen
@@ -816,6 +821,10 @@ def build_system_prompt(
         files.get("USER.md", ""),
         "",
         _memory_section(project_dir, config),
+        "",
+        "## Current User Session",
+        f"Discord User ID: `{user_id}`" if user_id else "Discord User ID: not available",
+        "",
         _prefs_section(config),
         _language_section(config, files.get("IDENTITY.md") or ""),
         _knowledge_verification_section(),

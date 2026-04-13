@@ -584,6 +584,7 @@ def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
             "max_chars_per_line": int((data.get("memory") or {}).get("max_chars_per_line", 300) or 300),
             "days": int((data.get("memory") or {}).get("days", 2) or 2),
             "max_tokens": int((data.get("memory") or {}).get("max_tokens", 4000) or 4000),
+            "track_user_id": bool((data.get("memory") or {}).get("track_user_id", False)),
         },
         "chat": {
             "context_quota": float((data.get("chat") or {}).get("context_quota", 0.85) or 0.85),
