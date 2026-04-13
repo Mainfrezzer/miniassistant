@@ -260,6 +260,9 @@ def _get_chat_response(
     """Synchroner Aufruf: Session für matrix_user_id, handle_user_input.
     Gibt **ausschließlich** den sichtbaren Content zurück – KEIN Thinking für Matrix."""
     from miniassistant.chat_loop import create_session, handle_user_input
+    # Set chat_context BEFORE creating session so user_id is included in system_prompt
+    if room_id:
+        config["_chat_context"] = {"platform": "matrix", "room_id": room_id, "user_id": matrix_user_id}
     if matrix_user_id not in sessions:
         sessions[matrix_user_id] = create_session(config, None)
     session = sessions[matrix_user_id]

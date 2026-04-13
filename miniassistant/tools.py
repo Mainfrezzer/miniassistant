@@ -25,6 +25,12 @@ except ImportError:
     _curl_requests = None  # type: ignore
     _CURL_CFFI_AVAILABLE = False
 
+try:
+    import brotli as _brotli  # noqa: F401
+    _BROTLI_AVAILABLE = True
+except ImportError:
+    _BROTLI_AVAILABLE = False
+
 # Playwright: lazy check — allows installation at runtime without restart
 _sync_playwright = None  # type: ignore
 _PLAYWRIGHT_AVAILABLE: bool | None = None  # None = not checked yet
@@ -495,6 +501,8 @@ def read_url(url: str, max_chars: int = 8000, timeout: float = 15.0, config: dic
     u = (url or "").strip()
     if not u:
         return {"ok": False, "content": "", "error": "URL is empty"}
+    if u.startswith("file://"):
+        return {"ok": False, "content": "", "error": "file:// URLs are not supported — use the read_file tool for local files"}
     if not u.startswith(("http://", "https://")):
         u = "https://" + u
     if _is_ssrf_target(u):
@@ -538,7 +546,7 @@ def read_url(url: str, max_chars: int = 8000, timeout: float = 15.0, config: dic
         "User-Agent": _USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate, br" if _BROTLI_AVAILABLE else "gzip, deflate",
     }
     client_kwargs: dict[str, Any] = {
         "timeout": timeout,

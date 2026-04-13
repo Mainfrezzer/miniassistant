@@ -683,6 +683,7 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
             "max_chars_per_line": (config.get("memory") or {}).get("max_chars_per_line", 300),
             "days": (config.get("memory") or {}).get("days", 2),
             "max_tokens": (config.get("memory") or {}).get("max_tokens", 4000),
+            "track_user_id": (config.get("memory") or {}).get("track_user_id", False),
         },
         "chat": {
             "context_quota": (config.get("chat") or {}).get("context_quota", 0.85),

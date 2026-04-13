@@ -14,6 +14,7 @@ User: [message]
 Assistant: [reply]
 ```
 
+
 ## Finding past conversations
 
 **The last 2 days** are already loaded in your system prompt (memory section above).

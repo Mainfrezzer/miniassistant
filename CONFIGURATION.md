@@ -259,7 +259,10 @@ Steuert den **Memory-Auszug** (tägliche Logs unter `agent_dir/memory/YYYY-MM-DD
 memory:
   max_chars_per_line: 400
   days: 2
+  track_user_id: true
 ```
+
+| `track_user_id` | boolean | nein | `false` | User-ID (Discord/Matrix) in Memory-Einträgen mitspeichern. Format: `User [discord_id]: ...` bzw. `User [@user:matrix.org]: ...`. Nützlich bei Multi-User-Umgebungen, um Gespräche einzelnen Nutzern zuzuordnen. |
 
 ---
 

@@ -328,6 +328,22 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
     )
 
 
+def _user_session_section(config: dict[str, Any]) -> str:
+    """Current User Session: Platform + User-ID aus _chat_context (falls vorhanden)."""
+    chat_ctx = (config or {}).get("_chat_context") or {}
+    platform = chat_ctx.get("platform")
+    user_id = chat_ctx.get("user_id")
+    if not platform and not user_id:
+        return ""
+    lines = ["## Current User Session"]
+    if platform:
+        lines.append(f"Platform: {platform}")
+    if user_id:
+        lines.append(f"User ID: `{user_id}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _memory_section(project_dir: str | None, config: dict[str, Any] | None = None) -> str:
     """Memory-Abschnitt für den System-Prompt.
 
@@ -774,7 +790,6 @@ def _voice_section(config: dict[str, Any]) -> str:
 def build_system_prompt(
     config: dict[str, Any] | None = None,
     project_dir: str | None = None,
-    user_id: str | None = None,
 ) -> str:
     """Baut den kompletten System-Prompt aus Config, Agent-Dateien, Runtime und Tools.
     Grobe Token-Abschätzung (ohne Chatverlauf ~50 Tokens weniger): mit Standard max_chars_per_file=500
@@ -782,10 +797,6 @@ def build_system_prompt(
     1000–1400 Tokens (≈ 3,5 Zeichen/Token). Der Abschnitt Chatverlauf addiert nur ~35 Tokens."""
     if config is None:
         config = load_config(project_dir)
-    # user_id aus chat_context extrahieren (falls nicht explizit übergeben)
-    if user_id is None and config:
-        chat_ctx = config.get("_chat_context") or {}
-        user_id = chat_ctx.get("user_id")
     # basic_rules laden (kopiert Defaults nach agent_dir/basic_rules/ falls nötig, cached im RAM)
     _load_basic_rules(config)
     # docs kopieren (kopiert Defaults nach agent_dir/docs/ falls nötig); Ergebnis direkt als Cache setzen
@@ -820,11 +831,8 @@ def build_system_prompt(
         "## USER (about your human)",
         files.get("USER.md", ""),
         "",
+        _user_session_section(config),
         _memory_section(project_dir, config),
-        "",
-        "## Current User Session",
-        f"Discord User ID: `{user_id}`" if user_id else "Discord User ID: not available",
-        "",
         _prefs_section(config),
         _language_section(config, files.get("IDENTITY.md") or ""),
         _knowledge_verification_section(),

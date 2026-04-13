@@ -397,7 +397,8 @@ def _strip_tool_call_tags(content: str) -> str:
     Wird als letzter Schritt aufgerufen bevor Content an Clients geliefert wird,
     damit fehlerhaft geparste Tool-Call-XML nie durchleakt."""
     _SIMPLE_TAGS = ("exec", "web_search", "read_url", "check_url")
-    if not any(tag in content for tag in ("<tool_call>", "<tools>", "<function=") + tuple(f"<{t}>" for t in _SIMPLE_TAGS)):
+    _GEMMA_MARKERS = ("<|tool_response>", "<tool_call|>", "<|\"|}>", "call:", "response:call_")
+    if not any(tag in content for tag in ("<tool_call>", "<tools>", "<function=") + tuple(f"<{t}>" for t in _SIMPLE_TAGS) + _GEMMA_MARKERS):
         return content
     for t in _SIMPLE_TAGS:
         content = _re.sub(rf'<{t}[^>]*>.*?</{t}>', '', content, flags=_re.DOTALL)
@@ -410,6 +411,16 @@ def _strip_tool_call_tags(content: str) -> str:
     content = _re.sub(r'<tool_call>.*', '', content, flags=_re.DOTALL)
     content = _re.sub(r'<tools>.*', '', content, flags=_re.DOTALL)
     content = _re.sub(r'<function=\w+>.*', '', content, flags=_re.DOTALL)
+    # Gemma 4: <|tool_response>response:call_NNN{value:<|"|>RESULT<|"|>}
+    content = _re.sub(r'<\|tool_response\>response:call_\d+\{value:<\|"\|>.*?<\|"\|>\}', '', content, flags=_re.DOTALL)
+    # Gemma 4: <|tool_response>call:TOOL{...}<tool_call|>
+    content = _re.sub(r'<\|tool_response\>call:\w+\{.*?\}<tool_call\|>', '', content, flags=_re.DOTALL)
+    # Gemma 4: verbleibende Einzel-Tokens
+    content = _re.sub(r'<\|tool_response\>', '', content)
+    content = _re.sub(r'<tool_call\|>', '', content)
+    content = _re.sub(r'<\|"\|>', '"', content)
+    # Gemma 4: verwaiste call:/response: Zeilen (abgebrochene Generierung)
+    content = _re.sub(r'^(call|response):\w+\{.*', '', content, flags=_re.MULTILINE | _re.DOTALL)
     return content.strip()
 
 
@@ -3791,6 +3802,26 @@ def _extract_tool_calls(message: dict[str, Any]) -> list[tuple[str, dict[str, An
                     if value:
                         out.append((tool_name, {arg_name: value}))
                         _log.info("Tool-Call (Format 7 <%s>-Tag) extrahiert: %s", tool_name, tool_name)
+    # Format 8: Gemma 4 natives Format — call:TOOLNAME{param:<|"|>value<|"|>}
+    # Erscheint wenn Ollama die tool_calls nicht via API liefert und der Content
+    # Gemmas interne Token-Sequenz enthält.
+    # Beispiel: <|tool_response>call:exec{command:<|"|>ls /tmp<|"|>}<tool_call|>
+    if not out and "call:" in (message.get("content") or ""):
+        _f8_content = message.get("content") or ""
+        for m in _re.finditer(r'call:(\w+)\{(.*?)\}(?:<tool_call\|>|$)', _f8_content, _re.DOTALL):
+            tool_name = m.group(1)
+            body = m.group(2)
+            args: dict[str, Any] = {}
+            # Parameter-Format: key:<|"|>value<|"|>
+            for pm in _re.finditer(r'(\w+):<\|"\|>(.*?)<\|"\|>', body, _re.DOTALL):
+                args[pm.group(1)] = pm.group(2).strip()
+            # Fallback: key:"value" oder key:value (ohne Gemma-Delimiter)
+            if not args:
+                for pm in _re.finditer(r'(\w+):"(.*?)"', body, _re.DOTALL):
+                    args[pm.group(1)] = pm.group(2).strip()
+            if tool_name and args:
+                out.append((tool_name, args))
+                _log.info("Tool-Call (Format 8 Gemma4 call:TOOL) extrahiert: %s %s", tool_name, args)
     if out:
         _log.info("_extract_tool_calls: %d Tool-Call(s) extrahiert: %s", len(out), [n for n, _ in out])
     elif any(tag in (message.get("content") or "") + (message.get("thinking") or "")
@@ -4894,10 +4925,10 @@ def create_session(config: dict[str, Any] | None = None, project_dir: str | None
     if config is None:
         config = load_config(project_dir)
     model = resolve_model(config, None)
-    # Extract user_id from chat_context
+    # user_id aus _chat_context extrahieren und an build_system_prompt weitergeben
     chat_ctx = config.get("_chat_context") or {}
     user_id = chat_ctx.get("user_id")
-    system_prompt = build_system_prompt(config, project_dir, user_id=user_id)
+    system_prompt = build_system_prompt(config, project_dir)
     return {
         "config": config,
         "project_dir": project_dir,
@@ -4962,10 +4993,7 @@ def handle_user_input(
             return f"Modell `{resolved}` nicht bei Ollama gefunden. Konfiguriert: {avail_str}. Wechsel abgebrochen.", session, None, None, None, None
         old_model = session.get("model") or ""
         session["model"] = resolved
-        # Extract user_id from chat_context
-        chat_ctx = config.get("_chat_context") or {}
-        user_id = chat_ctx.get("user_id")
-        session["system_prompt"] = build_system_prompt(config, project_dir, user_id=user_id)
+        session["system_prompt"] = build_system_prompt(config, project_dir)
         session["messages"] = []  # neuer „Sprecher“ → Verlauf löschen, wie bei /new
         try:
             content, thinking, _msgs, _debug, _switch = chat_round(
@@ -5000,7 +5028,7 @@ def handle_user_input(
         return "", session, None, None, None, None
     if raw.lower() in ("/new", "/neu"):
         # Preserve chat_context (with user_id) when creating new session
-        if "chat_context" in session:
+        if session.get("chat_context"):
             config["_chat_context"] = session["chat_context"]
         # create_session runs agent_loader (build_system_prompt) first, then we warmup with one prompt
         new_session = create_session(config, project_dir)
@@ -5126,7 +5154,6 @@ def handle_user_input(
     # Memory + mempalace: Web/API nur mit explizitem Speichern (_track_chat), sonst nichts persistieren
     if _should_append_exchange_to_memory(session, config):
         try:
-            # Only save user_id if track_user_id is enabled in config. Extract user_id from chat_context if available (for Discord/Matrix user tracking)
             track_user_id = config.get("memory", {}).get("track_user_id", False)
             user_id = None
             if track_user_id:

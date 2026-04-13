@@ -93,6 +93,7 @@ def append_exchange(
     Nur Inhalt, kein Thinking. Eine Zeile User:, dann Assistant: (mehrzeilig möglich).
     Filtert Noise (Auto-Title/Tags, Scheduled-Task-Preambles) heraus.
     Optional: schreibt parallel in mempalace (wenn aktiviert).
+    user_id: wenn gesetzt, wird die User-Zeile mit [user_id] getaggt.
     """
     if not assistant_content and not user_content:
         return None
@@ -105,7 +106,6 @@ def append_exchange(
     path = d / f"{_today_iso()}.md"
     user_line = (user_content or "").strip().replace("\n", " ")
     asst_block = (assistant_content or "").strip()
-    # Format with user_id prefix if available (e.g., for Discord/Matrix tracking)
     user_prefix = f"User [{user_id}]: " if user_id else "User: "
     line = f"{user_prefix}{user_line}\nAssistant: {asst_block}\n\n"
     with open(path, "a", encoding="utf-8") as f:
@@ -471,7 +471,6 @@ def _mempalace_store(
         # Assistent-Antwort auf sinnvolle Länge kürzen für Drawer
         if len(asst_block) > 800:
             asst_block = asst_block[:797] + "..."
-        # Add user_id prefix for tracking
         user_prefix = f"User [{user_id}]: " if user_id else "User: "
         content = f"{user_prefix}{user_line}\nAssistant: {asst_block}"
 

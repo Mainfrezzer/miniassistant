@@ -90,7 +90,6 @@ def _get_chat_response(
     # Set chat_context BEFORE creating session so user_id is included in system_prompt
     if channel_id:
         config["_chat_context"] = {"platform": "discord", "channel_id": channel_id, "user_id": discord_user_id}
-    
     if discord_user_id not in sessions:
         session = create_session(config, None)
         session["system_prompt"] = (
@@ -99,7 +98,7 @@ def _get_chat_response(
         )
         sessions[discord_user_id] = session
     session = sessions[discord_user_id]
-    # Chat-Kontext aktualisieren (Channel-ID kann sich ändern) - now redundant but kept for safety
+    # Chat-Kontext aktualisieren (Channel-ID kann sich ändern)
     if channel_id:
         session["chat_context"] = {"platform": "discord", "channel_id": channel_id, "user_id": discord_user_id}
     result = handle_user_input(session, user_message, allow_new_session=True, images=images)
