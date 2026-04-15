@@ -321,7 +321,7 @@ async def chat_completions(request: Request):
     config["_chat_context"] = {"platform": "api", "_api_base_url": _base}
 
     # --- System-Prompt (Agent-Kontext) aufbauen ---
-    system_prompt = build_system_prompt(config, project_dir)
+    system_prompt = build_system_prompt(config, project_dir, current_model=resolved)
     system_prompt += "\n\n## Current Chat Context\nPlatform: api"
 
     # Optionaler user system message an Agent-Prompt anhaengen

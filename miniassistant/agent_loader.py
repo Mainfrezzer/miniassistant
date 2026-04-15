@@ -712,19 +712,43 @@ def _tools_section(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _vision_section(config: dict[str, Any]) -> str:
+def _vision_section(config: dict[str, Any], current_model: str | None = None) -> str:
     """Vision/Image/Avatar-Abschnitt für System-Prompt."""
     from miniassistant.ollama_client import get_vision_models, get_image_generation_models
     vision_models = get_vision_models(config)
     img_gen_models = get_image_generation_models(config)
     avatar = config.get("avatar")
     agent_dir = config.get("agent_dir") or ""
-    # Immer anzeigen — Avatar-Info ist auch ohne Vision relevant
+
+    def _norm(m: str) -> str:
+        return m.split("/", 1)[-1] if "/" in m else m
+    current_is_vision = False
+    if current_model and vision_models:
+        current_norm = _norm(current_model)
+        current_is_vision = any(vm == current_model or _norm(vm) == current_norm for vm in vision_models)
+
     lines = ["## Vision, Image & Avatar"]
     if vision_models:
         models_str = ", ".join(f"`{m}`" for m in vision_models)
-        lines.append(f"- **Vision models:** {models_str} (image analysis). The user can request a specific model.")
-        lines.append("  If the current chat model itself supports vision (llava, gemma3, minicpm-v, etc.), analyze directly without switching.")
+        lines.append(f"- **Vision models configured:** {models_str}.")
+        if current_model:
+            if current_is_vision:
+                lines.append(
+                    f"- **You are `{current_model}` — you ARE vision-capable.** "
+                    "When the user uploads an image, the raw image bytes are attached to their message "
+                    "and you receive them directly. **Analyze the image in your own response.** "
+                    "Do NOT call `invoke_model` just to describe an image — that wastes a round-trip. "
+                    "Only delegate via `invoke_model` if the user explicitly asks for a different vision model."
+                )
+            else:
+                other_vm = next((vm for vm in vision_models if _norm(vm) != _norm(current_model)), vision_models[0])
+                lines.append(
+                    f"- **You are `{current_model}` — you are NOT vision-capable.** "
+                    f"Delegate image analysis via `invoke_model(model='{other_vm}', message='...', image_path='/path/to/image.png')`. "
+                    "The uploaded path appears in the user's message as `[Hochgeladenes Bild gespeichert unter:]`."
+                )
+        else:
+            lines.append("  If your current model is in this list, analyze images directly. Otherwise delegate via `invoke_model`.")
         docs_v = _docs_dir_path(config)
         docs_v_prefix = str(docs_v) + "/" if docs_v else "docs/"
         lines.append(f"  Read `{docs_v_prefix}VISION.md` for details on how to handle image uploads.")
@@ -790,6 +814,7 @@ def _voice_section(config: dict[str, Any]) -> str:
 def build_system_prompt(
     config: dict[str, Any] | None = None,
     project_dir: str | None = None,
+    current_model: str | None = None,
 ) -> str:
     """Baut den kompletten System-Prompt aus Config, Agent-Dateien, Runtime und Tools.
     Grobe Token-Abschätzung (ohne Chatverlauf ~50 Tokens weniger): mit Standard max_chars_per_file=500
@@ -844,7 +869,7 @@ def build_system_prompt(
         _planning_section(config),
         _tools_section(config),
         _docs_reference_section(config),
-        _vision_section(config),
+        _vision_section(config, current_model),
         _voice_section(config),
         "---\n*End of system instructions. Everything below is the conversation.*",
     ]

@@ -24,6 +24,12 @@ On cleanup: show contents first, ask before deleting, protect plans/prefs/images
 - Do NOT assume the user wants recurring tasks or automations
 Only do exactly what the user asked. If you think an action would be helpful, **ask first**.
 
+### No Tool Probing
+**NEVER** call a tool with placeholder or test arguments to see whether it works.
+- Forbidden: `send_email(to="test@test.com", subject="Test", body="Test")`, `exec("echo test")` to check the shell, dummy `save_config` calls, etc.
+- Either the user's request supplies real values → use them. Or it doesn't → do not call the tool.
+- Especially in **scheduled/autonomous tasks** (no live user): a tool you call actually does the thing. No dry-runs, no "let me see".
+
 ### Installing packages
 **Lightweight tools** (jq, curl, file, imagemagick, ripgrep, etc.): If a command fails because a small CLI tool is missing, **just install it and continue** — no permission needed.
 

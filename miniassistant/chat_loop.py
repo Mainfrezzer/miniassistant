@@ -4928,7 +4928,7 @@ def create_session(config: dict[str, Any] | None = None, project_dir: str | None
     # user_id aus _chat_context extrahieren und an build_system_prompt weitergeben
     chat_ctx = config.get("_chat_context") or {}
     user_id = chat_ctx.get("user_id")
-    system_prompt = build_system_prompt(config, project_dir)
+    system_prompt = build_system_prompt(config, project_dir, current_model=model)
     return {
         "config": config,
         "project_dir": project_dir,
@@ -4993,7 +4993,7 @@ def handle_user_input(
             return f"Modell `{resolved}` nicht bei Ollama gefunden. Konfiguriert: {avail_str}. Wechsel abgebrochen.", session, None, None, None, None
         old_model = session.get("model") or ""
         session["model"] = resolved
-        session["system_prompt"] = build_system_prompt(config, project_dir)
+        session["system_prompt"] = build_system_prompt(config, project_dir, current_model=resolved)
         session["messages"] = []  # neuer „Sprecher“ → Verlauf löschen, wie bei /new
         try:
             content, thinking, _msgs, _debug, _switch = chat_round(
