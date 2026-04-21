@@ -490,13 +490,14 @@ def _playwright_read_url(url: str, timeout: float = 30.0) -> str:
     return _html_to_text(html)
 
 
-def read_url(url: str, max_chars: int = 8000, timeout: float = 15.0, config: dict[str, Any] | None = None, proxy: str | None = None, js: bool = False) -> dict[str, Any]:
+def read_url(url: str, max_chars: int | None = 8000, timeout: float = 15.0, config: dict[str, Any] | None = None, proxy: str | None = None, js: bool = False, use_cache: bool = True) -> dict[str, Any]:
     """
     Liest den Inhalt einer URL und gibt ihn als bereinigten Text zurück.
     Nutzt einen Browser-User-Agent um Bot-Detection/Anubis-Checks zu vermeiden.
     HTML wird automatisch in Text konvertiert.
     GitHub-URLs (Issues, PRs, Dateien) werden automatisch über die API gelesen.
-    max_chars begrenzt die Ausgabe (für kleine Modell-Kontexte).
+    max_chars=None liefert ungekürzten Rohtext (für compress-callers).
+    use_cache=True nutzt session-cache (miniassistant.url_cache) — hits liefern ungekürzt.
     """
     u = (url or "").strip()
     if not u:
@@ -508,111 +509,160 @@ def read_url(url: str, max_chars: int = 8000, timeout: float = 15.0, config: dic
     if _is_ssrf_target(u):
         return {"ok": False, "content": "", "error": "Access to internal/private networks is blocked"}
 
-    # JS-Rendering via Playwright (optional, nur wenn js=True)
-    if js:
-        if not _check_playwright():
-            _log.warning("read_url: js=True but Playwright not installed — falling back to plain fetch")
-            fallback_note = "[Hinweis: js=True angefordert, aber Playwright ist nicht installiert. " \
-                            "Zum Installieren: exec: pip install miniassistant[js] && playwright install chromium]\n\n"
-        else:
-            try:
-                text = _playwright_read_url(u, timeout=max(timeout, 30.0))
-                if len(text) > max_chars:
-                    text = text[:max_chars] + "\n\n[... truncated ...]"
-                return {"ok": True, "content": text}
-            except Exception as e:
-                _log.warning("read_url: Playwright fehlgeschlagen (%s) — Fallback auf normalen Fetch", e)
-                # Fallback auf normalen httpx-Abruf
-            fallback_note = ""
-        # Playwright nicht verfügbar oder fehlgeschlagen → weiter mit normalem Fetch
-        # fallback_note wird unten ggf. dem Content vorangestellt
-    else:
-        fallback_note = ""
-
-    # GitHub-URLs über die API lesen (besserer Content, kein HTML-Navigation-Müll)
-    gh_token = ((config or {}).get("github_token") or "").strip() or None
-    gh_result = _try_github_api(u, gh_token, max_chars, timeout)
-    if gh_result is not None:
-        return gh_result
-    try:
-        proxy_url, connection_name = _get_proxy_for_request(config, proxy_name=proxy)
-    except ValueError as e:
-        return {"ok": False, "content": "", "error": str(e)}
-    if proxy_url:
-        _log.info("read_url: using connection '%s' → %s", connection_name, proxy_url)
-    else:
-        _log.info("read_url: using connection '%s' (direct)", connection_name)
-    headers = {
-        "User-Agent": _USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br" if _BROTLI_AVAILABLE else "gzip, deflate",
-    }
-    client_kwargs: dict[str, Any] = {
-        "timeout": timeout,
-        "follow_redirects": True,
-        "headers": headers,
-    }
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
-    last_err: Exception | None = None
-    for attempt in range(_RETRY_ATTEMPTS):
+    _cache = None
+    if use_cache and config is not None:
         try:
-            with httpx.Client(**client_kwargs) as client:
-                r = client.get(u)
-                r.raise_for_status()
-                content_type = r.headers.get("content-type", "")
-                if "html" in content_type:
-                    text = _html_to_text(r.text)
-                elif "json" in content_type:
-                    text = r.text
-                elif content_type.startswith("text/"):
-                    text = r.text
-                else:
-                    return {
-                        "ok": False,
-                        "content": "",
-                        "error": f"Unsupported content-type: {content_type}",
-                        "connection": connection_name,
-                    }
-            # Auf max_chars begrenzen
-            if len(fallback_note) + len(text) > max_chars:
-                text = text[:max_chars - len(fallback_note)] + "\n\n[... truncated ...]"
-            return {"ok": True, "content": fallback_note + text, "connection": connection_name}
-        except (httpx.TimeoutException, httpx.RemoteProtocolError) as e:
-            # Kein Retry bei Timeouts — wenn die Seite nicht antwortet, hilft warten nicht
-            return {"ok": False, "content": "", "error": str(e), "connection": connection_name}
-        except httpx.HTTPStatusError as e:
-            last_err = e
-            if e.response.status_code in (403, 429) and _CURL_CFFI_AVAILABLE:
-                # Bot-Detection (Cloudflare etc.) → Safari-Impersonation als Fallback
-                _log.info("read_url: HTTP %d → retrying with curl_cffi Safari impersonation", e.response.status_code)
-                try:
-                    cr = _curl_requests.get(u, impersonate="safari17_0", timeout=timeout)
-                    if cr.status_code < 400:
-                        ct = cr.headers.get("content-type", "")
-                        if "html" in ct:
-                            text = _html_to_text(cr.text)
-                        else:
-                            text = cr.text
-                        if len(text) > max_chars:
-                            text = text[:max_chars] + "\n\n[... truncated ...]"
-                        return {"ok": True, "content": text, "connection": connection_name}
-                except Exception as ce:
-                    _log.debug("read_url curl_cffi fallback failed: %s", ce)
-            if attempt < _RETRY_ATTEMPTS - 1 and e.response.status_code in _RETRYABLE_STATUS_CODES:
-                _log.warning("read_url attempt %d/%d failed (HTTP %d), retrying in %ds …", attempt + 1, _RETRY_ATTEMPTS, e.response.status_code, _RETRY_DELAY)
-                time.sleep(_RETRY_DELAY)
-                continue
-            return {
-                "ok": False,
-                "content": "",
-                "error": f"HTTP {e.response.status_code}: {e}",
-                "connection": connection_name,
-            }
+            from miniassistant.url_cache import get_cache
+            _cache = get_cache(config)
+            _hit = _cache.get(u)
+            if _hit is not None:
+                _log.info("read_url: cache hit for %s (%d tokens, %d entries total)", u, _hit.tokens, _cache.stats()["entries"])
+                _txt = _hit.raw
+                if max_chars is not None and len(_txt) > max_chars:
+                    _txt = _txt[:max_chars] + "\n\n[... truncated ...]"
+                return {"ok": True, "content": _txt, "connection": "cache", "from_cache": True}
         except Exception as e:
-            return {"ok": False, "content": "", "error": str(e), "connection": connection_name}
-    return {"ok": False, "content": "", "error": str(last_err), "connection": connection_name}
+            _log.debug("read_url: cache lookup failed for %s: %s", u, e)
+            _cache = None
+
+    def _cache_and_trim(raw: str) -> str:
+        """Store uncapped raw in session cache, return trimmed-to-max_chars copy."""
+        if _cache is not None and raw:
+            try:
+                from miniassistant.chat_loop import _estimate_tokens
+                _tok = _estimate_tokens(raw)
+            except Exception:
+                _tok = max(1, len(raw) // 4)
+            try:
+                _cache.put(u, raw, _tok)
+            except Exception as _e:
+                _log.debug("read_url: cache put failed: %s", _e)
+        if max_chars is not None and len(raw) > max_chars:
+            return raw[:max_chars] + "\n\n[... truncated ...]"
+        return raw
+
+    # In-flight dedup: if another thread already fetches this URL, wait for its cache put instead of re-fetching
+    _is_leader = True
+    if _cache is not None:
+        _is_leader, _evt = _cache.begin_fetch(u)
+        if not _is_leader:
+            _log.info("read_url: in-flight wait for %s (another thread is fetching)", u)
+            _got = _evt.wait(timeout=60)
+            _hit2 = _cache.get(u) if _got else None
+            if _hit2 is not None:
+                _log.info("read_url: in-flight dedup hit for %s (%d tokens)", u, _hit2.tokens)
+                _txt = _hit2.raw
+                if max_chars is not None and len(_txt) > max_chars:
+                    _txt = _txt[:max_chars] + "\n\n[... truncated ...]"
+                return {"ok": True, "content": _txt, "connection": "cache", "from_cache": True, "deduped": True}
+            # Waiter timed out OR leader finished without caching (fetch failed) → become leader ourselves
+            _is_leader, _evt = _cache.begin_fetch(u)
+
+    try:
+        # JS-Rendering via Playwright (optional, nur wenn js=True)
+        if js:
+            if not _check_playwright():
+                _log.warning("read_url: js=True but Playwright not installed — falling back to plain fetch")
+                fallback_note = "[Hinweis: js=True angefordert, aber Playwright ist nicht installiert. " \
+                                "Zum Installieren: exec: pip install miniassistant[js] && playwright install chromium]\n\n"
+            else:
+                try:
+                    text = _playwright_read_url(u, timeout=max(timeout, 30.0))
+                    return {"ok": True, "content": _cache_and_trim(text)}
+                except Exception as e:
+                    _log.warning("read_url: Playwright fehlgeschlagen (%s) — Fallback auf normalen Fetch", e)
+                    # Fallback auf normalen httpx-Abruf
+                fallback_note = ""
+            # Playwright nicht verfügbar oder fehlgeschlagen → weiter mit normalem Fetch
+            # fallback_note wird unten ggf. dem Content vorangestellt
+        else:
+            fallback_note = ""
+
+        # GitHub-URLs über die API lesen (besserer Content, kein HTML-Navigation-Müll)
+        gh_token = ((config or {}).get("github_token") or "").strip() or None
+        gh_result = _try_github_api(u, gh_token, max_chars, timeout)
+        if gh_result is not None:
+            return gh_result
+        try:
+            proxy_url, connection_name = _get_proxy_for_request(config, proxy_name=proxy)
+        except ValueError as e:
+            return {"ok": False, "content": "", "error": str(e)}
+        if proxy_url:
+            _log.info("read_url: using connection '%s' → %s", connection_name, proxy_url)
+        else:
+            _log.info("read_url: using connection '%s' (direct)", connection_name)
+        headers = {
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br" if _BROTLI_AVAILABLE else "gzip, deflate",
+        }
+        client_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "follow_redirects": True,
+            "headers": headers,
+        }
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        last_err: Exception | None = None
+        for attempt in range(_RETRY_ATTEMPTS):
+            try:
+                with httpx.Client(**client_kwargs) as client:
+                    r = client.get(u)
+                    r.raise_for_status()
+                    content_type = r.headers.get("content-type", "")
+                    if "html" in content_type:
+                        text = _html_to_text(r.text)
+                    elif "json" in content_type:
+                        text = r.text
+                    elif content_type.startswith("text/"):
+                        text = r.text
+                    else:
+                        return {
+                            "ok": False,
+                            "content": "",
+                            "error": f"Unsupported content-type: {content_type}",
+                            "connection": connection_name,
+                        }
+                return {"ok": True, "content": fallback_note + _cache_and_trim(text), "connection": connection_name}
+            except (httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                # Kein Retry bei Timeouts — wenn die Seite nicht antwortet, hilft warten nicht
+                return {"ok": False, "content": "", "error": str(e), "connection": connection_name}
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                if e.response.status_code in (403, 429) and _CURL_CFFI_AVAILABLE:
+                    # Bot-Detection (Cloudflare etc.) → Safari-Impersonation als Fallback
+                    _log.info("read_url: HTTP %d → retrying with curl_cffi Safari impersonation", e.response.status_code)
+                    try:
+                        cr = _curl_requests.get(u, impersonate="safari17_0", timeout=timeout)
+                        if cr.status_code < 400:
+                            ct = cr.headers.get("content-type", "")
+                            if "html" in ct:
+                                text = _html_to_text(cr.text)
+                            else:
+                                text = cr.text
+                            return {"ok": True, "content": _cache_and_trim(text), "connection": connection_name}
+                    except Exception as ce:
+                        _log.debug("read_url curl_cffi fallback failed: %s", ce)
+                if attempt < _RETRY_ATTEMPTS - 1 and e.response.status_code in _RETRYABLE_STATUS_CODES:
+                    _log.warning("read_url attempt %d/%d failed (HTTP %d), retrying in %ds …", attempt + 1, _RETRY_ATTEMPTS, e.response.status_code, _RETRY_DELAY)
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                return {
+                    "ok": False,
+                    "content": "",
+                    "error": f"HTTP {e.response.status_code}: {e}",
+                    "connection": connection_name,
+                }
+            except Exception as e:
+                return {"ok": False, "content": "", "error": str(e), "connection": connection_name}
+        return {"ok": False, "content": "", "error": str(last_err), "connection": connection_name}
+    finally:
+        if _is_leader and _cache is not None:
+            try:
+                _cache.finish_fetch(u)
+            except Exception as _fe:
+                _log.debug("read_url: finish_fetch failed for %s: %s", u, _fe)
 
 
 # ---------------------------------------------------------------------------

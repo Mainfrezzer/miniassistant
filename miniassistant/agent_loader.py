@@ -413,17 +413,28 @@ def _language_from_identity_md(identity_md: str) -> str:
     return ""
 
 
+def _filter_language_blocks(rule: str, lang: str) -> str:
+    """Keep <!-- IF:{lang} --> blocks matching *lang*, remove all others."""
+    import re
+    def _replace(m: re.Match) -> str:
+        block_lang = m.group(1).strip()
+        content = m.group(2)
+        if block_lang.lower() == lang.lower():
+            return content
+        return ""
+    return re.sub(
+        r"<!--\s*IF:(\w+)\s*-->(.*?)<!--\s*ENDIF\s*-->",
+        _replace, rule, flags=re.DOTALL,
+    )
+
+
 def _language_section(config: dict[str, Any], identity_md_content: str = "") -> str:
     """Response language from IDENTITY.md only; default Deutsch."""
     lang = _language_from_identity_md(identity_md_content) or "Deutsch"
     rule = _get_rule("language.md")
     if rule:
-        # Sprache aus IDENTITY.md in die Regeldatei injizieren (ersetzt 'Deutsch' Platzhalter)
-        # Wenn IDENTITY.md keine Sprache hat → Deutsch bleibt Default
-        if not _language_from_identity_md(identity_md_content):
-            # Keine Sprache in IDENTITY.md → Deutsch als Default
-            return rule.replace("**Deutsch**", "**Deutsch**") + "\n\n"
-        return rule.replace("**Deutsch**", f"**{lang}**") + "\n\n"
+        rule = _filter_language_blocks(rule, lang)
+        return rule + "\n\n"
     return (
         f"## Language\nAlways respond in **{lang}** unless the user explicitly asks for another language.\n\n"
     )
@@ -442,6 +453,37 @@ def _knowledge_verification_section() -> str:
         rule = rule.replace("{{current_date}}", today)
         return f"Today is **{today}**, current local time is **{current_time} {tz_name}**. Your training data (= everything you \"know\") has a cutoff date — anything after that is outdated.\n{rule}\n\n"
     return ""
+
+
+def refresh_datetime_in_prompt(system_prompt: str) -> str:
+    """Ersetzt die beiden Datumszeilen im System-Prompt durch aktuelle Werte.
+
+    Session-Prompt wird bei create_session gebaut und eingefroren — bei laufenden Sessions über
+    Mitternacht bleibt das Datum sonst auf dem Erstellungstag. Dieser Helper wird pro chat_round
+    aufgerufen, damit Datum/Uhrzeit immer aktuell sind. No-op wenn Marker fehlen.
+    """
+    import datetime as _dt
+    import re
+    now = _dt.datetime.now()
+    weekdays_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    date_de = f"{weekdays_de[now.weekday()]}, {now.strftime('%d.%m.%Y')} – {now.strftime('%H:%M')} Uhr"
+    system_prompt = re.sub(
+        r"\*\*Heute:\*\* [^\n]+",
+        lambda _m: f"**Heute:** {date_de}",
+        system_prompt,
+        count=1,
+    )
+    now_tz = now.astimezone()
+    today = now_tz.strftime("%B %d, %Y")
+    current_time = now_tz.strftime("%H:%M:%S")
+    tz_name = now_tz.strftime("%Z") or now_tz.strftime("%z")
+    system_prompt = re.sub(
+        r"Today is \*\*[^*]+\*\*, current local time is \*\*[^*]+\*\*\.",
+        lambda _m: f"Today is **{today}**, current local time is **{current_time} {tz_name}**.",
+        system_prompt,
+        count=1,
+    )
+    return system_prompt
 
 
 def _tools_umgebung_section(tools_md: str, config: dict[str, Any]) -> str:

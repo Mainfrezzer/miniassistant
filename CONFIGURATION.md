@@ -35,6 +35,7 @@ Alle Einstellungen sind **optional**. Was nicht gesetzt ist, nutzt sinnvolle Def
 - **email** – (optional) E-Mail-Konten (IMAP/SMTP). Mehrere Konten möglich; der Assistent kann Mails lesen, schreiben und senden über die eingebauten `send_email` und `read_email` Tools.
 - **onboarding_complete** – (intern) Wird **nur** auf `true` gesetzt, wenn in der Web-UI beim Onboarding/Setup auf **„Speichern”** geklickt wurde. Das CLI-`config` legt nur Config und Agent-Dateien an und setzt dieses Flag **nicht** – so bleibt der Onboarding-Button sichtbar, bis der Nutzer das Setup in der Web-UI abschließt und speichert. Default: `false`.
 - **memory** – (optional) Einstellungen für den Memory-Auszug im System-Prompt (z. B. `max_chars_per_line`).
+- **mempalace** – (optional) Semantischer Memory (ChromaDB). Ersetzt den Markdown-Auszug durch L0+L1 (~500–900 Tokens) + `search_memory` Tool. Inkl. `language` für Entity-Detection (z. B. `de`).
 - **chat** – (optional) Smart Compacting: `context_quota` (Anteil von `num_ctx` der genutzt wird, Default 0.85). Bei Überschreitung wird der Chatverlauf automatisch komprimiert.
 - **vision** – (optional) Vision-Modell für Bildanalyse. Kann Modellname (String) oder Objekt mit `model` und `num_ctx` sein.
 - **image_generation** – (optional) Modell für Bildgenerierung. Gleiches Format wie `vision`.
@@ -289,6 +290,39 @@ Jeder Exchange wird nach jeder Runde in `memory/YYYY-MM-DD.md` gespeichert — n
 chat:
   context_quota: 0.85
 ```
+
+---
+
+## 6b3. mempalace (Semantic Memory)
+
+Optional: ersetzt den plain-Markdown-Memory-Auszug durch **mempalace** — eine ChromaDB-basierte semantische Memory-Engine. L0 (Identity) + L1 (Top Moments) gehen in den System-Prompt (~500–900 Tokens statt ~4500). Das LLM bekommt zusätzlich ein `search_memory` Tool. Daten liegen **lokal** unter `agent_dir/mempalace/`. ChromaDB-Telemetrie ist deaktiviert.
+
+**Voraussetzung:** `pip install 'miniassistant[mempalace]'`
+
+| Schlüssel | Typ | Pflicht? | Default | Beschreibung |
+|-----------|-----|----------|---------|--------------|
+| `enabled` | boolean | nein | `false` | Aktiviert mempalace (Palace wird beim ersten Start automatisch erstellt). |
+| `wing` | string | nein | `miniassistant` | Wing-Name für gespeicherte Gespräche. |
+| `default_room` | string | nein | `conversations` | Default-Room für neue Exchanges. |
+| `max_tokens` | integer | nein | `900` | Token-Budget für L0+L1 im System-Prompt (~500–900). |
+| `language` | string/list | nein | (leer = `en`) | Sprache(n) für Entity-Detection (Person, Dialog, Topic). Eine Sprache als String (`de`), mehrere als Liste (`[de, en]`). Wirkt process-weit via `MEMPALACE_ENTITY_LANGUAGES` und persistiert in `~/.mempalace/config.json`. |
+| `palace_path` | string | nein | `agent_dir/mempalace/palace` | Alternativer ChromaDB-Pfad. |
+| `identity_path` | string | nein | `agent_dir/mempalace/identity.txt` | L0 Identity-Datei. |
+
+**Sprach-Hinweis:** Ohne `language` nutzt mempalace englische Entity-Patterns — Personen- und Themen-Erkennung auf deutschem Chatverlauf funktioniert dann schlechter. Für deutschsprachige Assistenten `language: de` setzen.
+
+**Beispiel:**
+
+```yaml
+mempalace:
+  enabled: true
+  wing: miniassistant
+  default_room: conversations
+  max_tokens: 900
+  language: de
+```
+
+Wenn `mempalace.enabled: true`, werden `memory.days` / `memory.max_tokens` / `memory.max_chars_per_line` **nicht** mehr benutzt (nur Fallback wenn mempalace nicht verfügbar).
 
 ---
 

@@ -542,6 +542,32 @@ def _parse_model_ref_list(raw: Any) -> list[str]:
     return []
 
 
+def _normalize_mempalace_language(raw: Any) -> list[str]:
+    """mempalace.language: str ("de") oder list (["de","en"]) → list. Leer = []."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return parts
+    if isinstance(raw, list):
+        return [str(p).strip() for p in raw if str(p).strip()]
+    return []
+
+
+def _clean_mempalace_for_save(mp: dict[str, Any]) -> dict[str, Any]:
+    """Bereinigt mempalace-Dict für YAML-Output: leere Strings/Listen weglassen,
+    language mit einem Eintrag als String schreiben statt als Liste."""
+    out: dict[str, Any] = {}
+    for k, v in mp.items():
+        if v in ("", [], None, {}):
+            continue
+        if k == "language" and isinstance(v, list) and len(v) == 1:
+            out[k] = v[0]
+        else:
+            out[k] = v
+    return out
+
+
 def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
     providers_data = data.get("providers") or {}
     server = data.get("server") or {}
@@ -611,6 +637,7 @@ def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
             "max_tokens": int((data.get("mempalace") or {}).get("max_tokens", 900) or 900),
             "palace_path": (data.get("mempalace") or {}).get("palace_path", ""),
             "identity_path": (data.get("mempalace") or {}).get("identity_path", ""),
+            "language": _normalize_mempalace_language((data.get("mempalace") or {}).get("language")),
         },
         # Top-level Tuning-Keys: nur einfügen wenn in YAML gesetzt (Key fehlt → Caller-Default greift)
         **{k: data[k] for k in (
@@ -699,7 +726,12 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
         "subagents": list(config.get("subagents") or []),
         "fallbacks": list(config.get("fallbacks") or []),
         "raw_proxy": config.get("raw_proxy") or {},
+        "mempalace": _clean_mempalace_for_save(config.get("mempalace") or {}),
     }
+    if config.get("trash_dir"):
+        out["trash_dir"] = config["trash_dir"]
+    if config.get("read_url"):
+        out["read_url"] = config["read_url"]
     # vision / image_generation nur schreiben wenn gesetzt (als Liste)
     if config.get("vision"):
         out["vision"] = config["vision"]

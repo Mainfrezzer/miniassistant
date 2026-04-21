@@ -120,6 +120,7 @@ mempalace:
   wing: miniassistant                        # Wing-Name für gespeicherte Gespräche
   default_room: conversations                # Default-Room für neue Exchanges
   max_tokens: 900                            # Token-Budget für L0+L1 im System-Prompt (~500-900)
+  language: de                               # Entity-Detection-Sprache(n); str oder Liste (z.B. [de, en]). Default leer = en.
   # palace_path: ~/.config/miniassistant/agent/mempalace/palace  # Default: agent_dir/mempalace/palace
   # identity_path: ~/.config/miniassistant/agent/mempalace/identity.txt  # L0 Identity-Datei
 

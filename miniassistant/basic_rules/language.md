@@ -2,6 +2,7 @@
 The response language is set in IDENTITY.md (`Response language: Deutsch/English/etc.`).
 **If IDENTITY.md does not specify a language: use Deutsch (default).**
 
+<!-- IF:Deutsch -->
 ### Always "du", never "Sie"
 Use **"du"** (informal) at all times — never "Sie". If the USER section contains a name, use it naturally (e.g. "Hey Max," not "Sehr geehrter Nutzer").
 
@@ -13,6 +14,7 @@ Use **"du"** (informal) at all times — never "Sie". If the USER section contai
 - 11:00–17:00 → "Guten Tag" / "Hallo"
 - 17:00–21:00 → "Guten Abend"
 - 21:00–05:00 → "Guten Abend" / "Hallo"
+<!-- ENDIF -->
 
 ## Local Search & Shopping
 Match searches to the user's country (from IDENTITY.md):

@@ -125,6 +125,31 @@ def _estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 _mempalace_available: bool | None = None  # lazy check
+_mempalace_env_applied: bool = False  # language env var already set?
+
+
+def _apply_mempalace_env(mp_cfg: dict[str, Any]) -> None:
+    """Setzt MEMPALACE_ENTITY_LANGUAGES wenn mempalace.language konfiguriert.
+
+    Wirkt process-wide: MempalaceConfig().entity_languages liest die env-Var
+    vor der config.json. Idempotent — setzt nur einmal pro Prozess.
+    """
+    global _mempalace_env_applied
+    if _mempalace_env_applied:
+        return
+    lang = mp_cfg.get("language") or []
+    if isinstance(lang, str):
+        lang = [p.strip() for p in lang.split(",") if p.strip()]
+    if lang:
+        import os as _os
+        _os.environ["MEMPALACE_ENTITY_LANGUAGES"] = ",".join(lang)
+        try:
+            from mempalace.i18n import load_lang
+            load_lang(lang[0])
+        except Exception:
+            pass
+        _log.info("mempalace: language=%s applied", ",".join(lang))
+    _mempalace_env_applied = True
 
 
 def _mempalace_palace_path(project_dir: str | None = None) -> str:
@@ -156,6 +181,7 @@ def _check_mempalace(project_dir: str | None = None, auto_init: bool = True) -> 
     try:
         import os as _os
         _os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+        _apply_mempalace_env(_get_mempalace_config(project_dir))
         import chromadb  # noqa: F401
         palace = Path(_mempalace_palace_path(project_dir))
         palace_exists = palace.exists() and (palace / "chroma.sqlite3").exists()
@@ -279,10 +305,24 @@ def init_mempalace(project_dir: str | None = None) -> str:
     """
     import os as _os
     _os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+    mp_cfg = _get_mempalace_config(project_dir)
+    _apply_mempalace_env(mp_cfg)
     import chromadb
 
     palace_path = _mempalace_palace_path(project_dir)
     Path(palace_path).mkdir(parents=True, exist_ok=True)
+
+    # Persist entity_languages to global mempalace config (~/.mempalace/config.json)
+    # damit externe mempalace-CLI-Tools die gleiche Sprache sehen.
+    lang = mp_cfg.get("language") or []
+    if isinstance(lang, str):
+        lang = [p.strip() for p in lang.split(",") if p.strip()]
+    if lang:
+        try:
+            from mempalace.config import MempalaceConfig
+            MempalaceConfig().set_entity_languages(lang)
+        except Exception as e:
+            _log.warning("mempalace: persist entity_languages failed: %s", e)
 
     # Identity-Datei neben palace/ anlegen wenn nicht vorhanden
     identity_path = str(Path(palace_path).parent / "identity.txt")

@@ -14,7 +14,7 @@ import httpx
 
 _log = logging.getLogger("miniassistant")
 
-from miniassistant.agent_loader import build_system_prompt
+from miniassistant.agent_loader import build_system_prompt, refresh_datetime_in_prompt
 from miniassistant.config import load_config
 from miniassistant.ollama_client import (
     chat as ollama_chat,
@@ -867,6 +867,170 @@ def _trim_messages_to_fit(
     return out + [current_message]
 
 
+def _salvage_subagent_tool_results(msgs: list[dict[str, Any]], max_chars: int = 12000) -> str:
+    """Extract tool-results from a subagent's msgs for partial-result salvage on API error.
+
+    Concatenates most recent tool messages with their triggering tool_call args (URL/query).
+    Capped to max_chars — older results dropped if over budget.
+    """
+    entries: list[str] = []
+    pending_calls: list[dict[str, Any]] = []
+    for m in msgs:
+        role = m.get("role")
+        if role == "assistant":
+            tcs = m.get("tool_calls") or []
+            pending_calls = [
+                (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                for tc in tcs
+            ]
+        elif role == "tool":
+            content = str(m.get("content") or "")
+            if not content.strip():
+                continue
+            tag = ""
+            if pending_calls:
+                fn = pending_calls.pop(0)
+                fname = fn.get("name") or ""
+                fargs = fn.get("arguments") or {}
+                if isinstance(fargs, str):
+                    try:
+                        fargs = json.loads(fargs)
+                    except Exception:
+                        fargs = {}
+                _hint = fargs.get("url") or fargs.get("query") or ""
+                tag = f"[{fname}: {_hint}]" if fname else ""
+            entries.append(f"{tag}\n{content}" if tag else content)
+    if not entries:
+        return ""
+    # Take most recent; cap total
+    out_parts: list[str] = []
+    total = 0
+    for e in reversed(entries):
+        if total + len(e) > max_chars:
+            snippet = e[: max(0, max_chars - total)]
+            if snippet:
+                out_parts.append(snippet + "\n[... truncated ...]")
+            break
+        out_parts.append(e)
+        total += len(e)
+    return "\n\n---\n\n".join(reversed(out_parts))
+
+
+_ROLLING_SUMMARY_THRESHOLD = 40_000  # tool-result tokens before proactive summarize
+
+
+def _proactive_rolling_summary(
+    msgs: list[dict[str, Any]],
+    user_msg: str,
+    api_key: str,
+    api_model: str,
+    base_url: str,
+    sub_timeout: float,
+    resolved_name: str,
+) -> list[dict[str, Any]]:
+    """Proactive rolling summary: when tool results exceed threshold, compress all findings
+    into one task-aware summary block, rebuild msgs compactly to keep context bounded.
+
+    New msgs: [original_task, summary_context, last_assistant, last_tool_results]
+    Called AFTER tool execution rounds — not before API calls (that's _compact_subagent_msgs).
+    """
+    from miniassistant.openai_client import api_chat as _oai_chat, OPENAI_API_URL as _OAI_URL
+
+    # Measure total tool-result tokens
+    tool_parts: list[str] = []
+    for m in msgs:
+        if m.get("role") == "tool":
+            c = (m.get("content") or "").strip()
+            if c:
+                tool_parts.append(c)
+    if not tool_parts:
+        return msgs, False
+    total_tool_tokens = sum(_estimate_tokens(p) for p in tool_parts)
+    if total_tool_tokens < _ROLLING_SUMMARY_THRESHOLD:
+        return msgs, False
+
+    _log.info(
+        "Subagent %s: rolling summary triggered (%d tool-result tokens across %d calls)",
+        resolved_name, total_tool_tokens, len(tool_parts),
+    )
+
+    all_findings = "\n\n---\n\n".join(tool_parts)
+    _sum_system = (
+        "Fasse die gesammelten Recherche-Ergebnisse für die TASK zusammen.\n"
+        "VERBATIM erhalten: URLs, Zahlen, Preise, Versionen, Zitate, Code, Fehler, Daten.\n"
+        "Stil: kompakt, faktenreich, Markdown-Liste. Keine Einleitung.\n"
+        "Antworte in der Sprache der TASK."
+    )
+    _sum_input = f"TASK:\n{user_msg[:2000]}\n\nGESAMMELTE ERGEBNISSE:\n{all_findings}"
+    try:
+        _sr = _oai_chat(
+            [{"role": "user", "content": _sum_input}],
+            api_key=api_key, model=api_model,
+            system=_sum_system, thinking=False, tools=None,
+            base_url=base_url or _OAI_URL,
+            timeout=int(sub_timeout),
+        )
+        summary = ((_sr.get("message") or {}).get("content") or "").strip()
+    except Exception as _se:
+        _log.warning("Subagent %s: rolling summary call failed (%s) — skipping", resolved_name, _se)
+        return msgs, False
+
+    if not summary:
+        return msgs, False
+
+    summary_tok = _estimate_tokens(summary)
+    _log.info(
+        "Subagent %s: rolling summary done (%d → %d tokens, %d tool results collapsed)",
+        resolved_name, total_tool_tokens, summary_tok, len(tool_parts),
+    )
+
+    # Rebuild: task + summary-context + last assistant turn (with its tool results)
+    last_assistant: dict | None = None
+    last_tool_results: list[dict] = []
+    for m in reversed(msgs):
+        if m.get("role") == "tool" and last_assistant is None:
+            last_tool_results.insert(0, m)
+        elif m.get("role") == "assistant":
+            last_assistant = m
+            break
+
+    summary_msg = {
+        "role": "user",
+        "content": (
+            f"[Zwischenzusammenfassung der bisherigen Recherche-Ergebnisse]\n{summary}\n\n"
+            "Setze die Recherche fort — nutze obige Ergebnisse, wiederhole keine bereits gelesenen Quellen."
+        ),
+    }
+    new_msgs: list[dict] = [msgs[0], summary_msg]
+    if last_assistant:
+        new_msgs.append(last_assistant)
+        new_msgs.extend(last_tool_results)
+    return new_msgs, True  # True = summary happened, caller should apply cooldown
+
+
+def _maybe_rolling_summary(
+    msgs: list[dict[str, Any]],
+    user_msg: str,
+    api_key: str,
+    api_model: str,
+    base_url: str,
+    sub_timeout: float,
+    resolved_name: str,
+    cooldown_rounds: list[int],  # mutable [remaining_cooldown]
+) -> list[dict[str, Any]]:
+    """Wrapper that respects cooldown. cooldown_rounds[0] decrements each call."""
+    if cooldown_rounds[0] > 0:
+        cooldown_rounds[0] -= 1
+        return msgs
+    result = _proactive_rolling_summary(msgs, user_msg, api_key, api_model, base_url, sub_timeout, resolved_name)
+    if isinstance(result, tuple):
+        new_msgs, did_summarize = result
+        if did_summarize:
+            cooldown_rounds[0] = 3  # skip next 3 rounds before re-checking
+        return new_msgs
+    return result
+
+
 def _trim_subagent_msgs(
     msgs: list[dict[str, Any]],
     system: str,
@@ -1534,7 +1698,7 @@ def _run_tools_maybe_concurrent(
     # Gesamt-Timeout pro Tool-Block: invoke_model/subagent-Calls können mit Retries
     # sehr lange dauern (15 Runden × 300s × 3 API-Retries). Dieses Timeout stellt sicher,
     # dass der Orchestrator die Kontrolle zurückbekommt.
-    _concurrent_timeout = float(config.get("invoke_model_timeout") or 600)  # Default 10 min
+    _concurrent_timeout = float(config.get("invoke_model_timeout") or 1800)  # Default 30 min
 
     for block_type, indices in blocks:
         if block_type == "concurrent" and len(indices) >= 2:
@@ -3168,6 +3332,7 @@ def _run_subagent_openai(
 
     sub_tools = get_subagent_tools_schema(config)
     _sub_num_ctx = get_num_ctx_for_model(config, resolved_name)
+    _sub_timeout = float(config.get("subagent_api_timeout") or config.get("api_timeout") or 900)
     msgs: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
     total_content = ""
     total_thinking = ""
@@ -3175,6 +3340,7 @@ def _run_subagent_openai(
     rounds_used = 0
     _consecutive_search_fails = 0
     _MAX_SEARCH_FAILS = 2
+    _rolling_cooldown = [0]  # mutable for _maybe_rolling_summary
     for _round in range(int(config.get("max_tool_rounds", 15))):
         # Proaktiv compacten bevor Context voll ist
         msgs = _compact_subagent_msgs(config, msgs, resolved_name, system, sub_tools, _sub_num_ctx)
@@ -3183,24 +3349,56 @@ def _run_subagent_openai(
                 msgs, api_key=api_key, model=api_model,
                 system=system, thinking=think, tools=sub_tools,
                 base_url=base_url or OPENAI_API_URL,
+                timeout=int(_sub_timeout),
             )
         except Exception as e:
-            # Bei Context-Exceeded: aggressiv trimmen (kein API-Call) und einmal retrien
+            # Bei Context-Exceeded: escalating trim (quota 0.60 → 0.40 → 0.25) mit je 1 retry
             _err_str = str(e).lower()
-            if "context" in _err_str and ("exceeded" in _err_str or "size" in _err_str or "length" in _err_str):
-                _log.warning("Subagent %s: context exceeded — trimming and retrying", resolved_name)
-                msgs = _trim_subagent_msgs(msgs, system, sub_tools, _sub_num_ctx, quota=0.60)
-                try:
-                    r = openai_chat(
-                        msgs, api_key=api_key, model=api_model,
-                        system=system, thinking=think, tools=sub_tools,
-                        base_url=base_url or OPENAI_API_URL,
-                    )
-                except Exception as e2:
-                    total_content += f"[OpenAI API error: {e2}]"
+            _is_ctx = "context" in _err_str and ("exceeded" in _err_str or "size" in _err_str or "length" in _err_str)
+            if _is_ctx:
+                r = None
+                _last_exc = e
+                for _quota in (0.60, 0.40, 0.25):
+                    _log.warning("Subagent %s: context exceeded — trim quota=%.2f and retry", resolved_name, _quota)
+                    msgs = _trim_subagent_msgs(msgs, system, sub_tools, _sub_num_ctx, quota=_quota)
+                    try:
+                        r = openai_chat(
+                            msgs, api_key=api_key, model=api_model,
+                            system=system, thinking=think, tools=sub_tools,
+                            base_url=base_url or OPENAI_API_URL,
+                            timeout=int(_sub_timeout),
+                        )
+                        _log.info("Subagent %s: context retry succeeded at quota=%.2f", resolved_name, _quota)
+                        break
+                    except Exception as e2:
+                        _last_exc = e2
+                        _err2 = str(e2).lower()
+                        if not ("context" in _err2 and ("exceeded" in _err2 or "size" in _err2 or "length" in _err2)):
+                            # Other error — don't keep shrinking
+                            break
+                if r is None:
+                    _pre = total_content
+                    total_content += f"[OpenAI API error: {_last_exc}]"
+                    if not _pre.strip():
+                        _sv = _salvage_subagent_tool_results(msgs)
+                        if _sv:
+                            total_content = (
+                                f"[Teilergebnis: Subagent wurde unterbrochen]\n\n{_sv}"
+                            )
+                            _log.info("Subagent %s (openai): salvaged %d chars after all ctx-retries failed",
+                                      resolved_name, len(_sv))
                     break
             else:
+                _pre = total_content
                 total_content += f"[OpenAI API error: {e}]"
+                if not _pre.strip():
+                    _sv = _salvage_subagent_tool_results(msgs)
+                    if _sv:
+                        total_content = (
+                            f"[Teilergebnis: Subagent wurde unterbrochen]\n\n{_sv}"
+                        )
+                        _log.info("Subagent %s (openai): salvaged %d chars after API error",
+                                  resolved_name, len(_sv))
                 break
         msg = r.get("message") or {}
         if msg.get("thinking"):
@@ -3241,11 +3439,54 @@ def _run_subagent_openai(
                 if _cu_r.get("error"): _cu_parts.append(f"error: {_cu_r['error']}")
                 tool_result = "\n".join(_cu_parts)
             elif tc_name == "read_url":
-                _ru_r = tool_read_url(tc_args.get("url", ""), config=config, proxy=tc_args.get("proxy"), js=bool(tc_args.get("js", False)))
+                _ru_url = tc_args.get("url", "")
+                _ru_r = tool_read_url(
+                    _ru_url, config=config,
+                    proxy=tc_args.get("proxy"), js=bool(tc_args.get("js", False)),
+                    max_chars=None,
+                )
                 _ru_conn = _ru_r.get("connection", "")
                 if _ru_r.get("ok"):
                     _ru_content = _ru_r.get("content", "")
-                    tool_result = f"[connection: {_ru_conn}]\n{_ru_content}" if _ru_conn else _ru_content
+                    _ru_tokens = _estimate_tokens(_ru_content)
+                    _from_cache = bool(_ru_r.get("from_cache"))
+                    if _ru_tokens > 15000 and user_msg:
+                        _log.info("Subagent %s (openai): read_url %s = %d tok → compress (task-aware)",
+                                  resolved_name, _ru_url, _ru_tokens)
+                        try:
+                            _compress_system = (
+                                "Extrahiere aus dem webseiten-text alle infos relevant für die TASK.\n"
+                                "VERBATIM erhalten: URLs, zahlen, preise, versionen, zitate, code, error-messages, datum.\n"
+                                "Drop: navigation, cookie-banner, ads, related-posts, footer-links, boilerplate.\n"
+                                "Format: kompakte fakten-liste, keine einleitung. Max ~5000 tokens output.\n"
+                                "Antworte in der sprache der quelle."
+                            )
+                            _compress_msg = (
+                                f"TASK:\n{user_msg}\n\nURL: {_ru_url}\n\nRAW CONTENT:\n{_ru_content}"
+                            )
+                            _cr = openai_chat(
+                                [{"role": "user", "content": _compress_msg}],
+                                api_key=api_key, model=api_model,
+                                system=_compress_system, thinking=False, tools=None,
+                                base_url=base_url or OPENAI_API_URL,
+                                timeout=600,
+                            )
+                            _compressed = ((_cr.get("message") or {}).get("content") or "").strip()
+                            if _compressed:
+                                _src = "cache" if _from_cache else (_ru_conn or "fetch")
+                                tool_result = (
+                                    f"[compressed {_ru_tokens}→{_estimate_tokens(_compressed)} tok, "
+                                    f"src: {_src}, url: {_ru_url}]\n{_compressed}"
+                                )
+                            else:
+                                tool_result = _ru_content[:24000] + "\n\n[... truncated (compress empty) ...]"
+                        except Exception as _ce:
+                            _log.warning("Subagent %s (openai): compress failed for %s (%s) — hard trim",
+                                         resolved_name, _ru_url, _ce)
+                            tool_result = _ru_content[:24000] + "\n\n[... truncated (compress error) ...]"
+                    else:
+                        _prefix = "[cache hit] " if _from_cache else ""
+                        tool_result = f"{_prefix}[connection: {_ru_conn}]\n{_ru_content}" if _ru_conn else f"{_prefix}{_ru_content}"
                 else:
                     _ru_err = _ru_r.get("error", "unknown error")
                     tool_result = f"[connection: {_ru_conn}] Error reading URL: {_ru_err}" if _ru_conn else f"Error reading URL: {_ru_err}"
@@ -3254,9 +3495,21 @@ def _run_subagent_openai(
             _aal.log_tool_call(config, f"subagent:{tc_name}", tc_args, tool_result)
             msgs.append({"role": "tool", "tool_name": tc_name, "content": str(tool_result)})
         rounds_used += 1
+        # Proaktive rolling summary: wenn tool-results zu groß → sofort komprimieren (mit cooldown)
+        msgs = _maybe_rolling_summary(
+            msgs, user_msg, api_key, api_model, base_url or OPENAI_API_URL,
+            _sub_timeout, resolved_name, _rolling_cooldown,
+        )
     result = _strip_tool_call_tags(total_content).strip()
     if not result:
         result = _strip_tool_call_tags(total_thinking).strip()
+    if not result:
+        # Salvage: if subagent returned nothing, reconstruct from tool results
+        _sv = _salvage_subagent_tool_results(msgs)
+        if _sv:
+            _log.info("Subagent %s (openai): no content — salvaging %d chars from tool results",
+                      resolved_name, len(_sv))
+            result = f"[Teilergebnis: Subagent wurde unterbrochen]\n\n{_sv}"
     if not result:
         result = "(Keine Antwort)"
     elif _is_planning_only(result):
@@ -3374,6 +3627,7 @@ def _run_subagent_with_tools(
     rounds_used = 0
     _consecutive_search_fails = 0
     _MAX_SEARCH_FAILS = 2
+    _rolling_cooldown = [0]
     for _round in range(max_rounds):
         # Proaktiv compacten bevor Context voll ist
         msgs = _compact_subagent_msgs(config, msgs, resolved_name, system, tools, num_ctx)
@@ -3401,10 +3655,11 @@ def _run_subagent_with_tools(
                         _err_body = getattr(e, "response", None).text if getattr(e, "response", None) else ""
                     except Exception:
                         pass
-                    # Context-Exceeded (500): aggressiv trimmen und retrien
+                    # Context-Exceeded (500): escalating trim 0.60→0.40→0.25 per attempt
                     if code == 500 and "context" in _err_body.lower():
-                        _log.warning("Subagent %s: context exceeded (attempt %d/3) — trimming and retrying", resolved_name, _attempt + 1)
-                        msgs = _trim_subagent_msgs(msgs, system, tools, num_ctx, quota=0.60)
+                        _quota = (0.60, 0.40, 0.25)[_attempt]
+                        _log.warning("Subagent %s: context exceeded (attempt %d/3) — trim quota=%.2f and retry", resolved_name, _attempt + 1, _quota)
+                        msgs = _trim_subagent_msgs(msgs, system, tools, num_ctx, quota=_quota)
                         time.sleep(2)
                         continue
                     if isinstance(e, (httpx.TimeoutException, httpx.RemoteProtocolError)) or code == 400:
@@ -3417,8 +3672,56 @@ def _run_subagent_with_tools(
             break
         # API-Fehler abfangen (Ollama gibt {"error": "..."} bei Problemen)
         if r.get("error"):
-            total_content += f"[API error: {r['error']}]"
-            break
+            _err_txt = str(r["error"])
+            _err_low = _err_txt.lower()
+            # Context-exceeded als dict-error: escalating retry bevor wir aufgeben
+            if "context" in _err_low and ("exceeded" in _err_low or "size" in _err_low or "length" in _err_low):
+                _ctx_retry_ok = False
+                for _cq in (0.60, 0.40, 0.25):
+                    _log.warning("Subagent %s: context error in response — trim quota=%.2f and retry", resolved_name, _cq)
+                    msgs = _trim_subagent_msgs(msgs, system, tools, num_ctx, quota=_cq)
+                    try:
+                        r2 = ollama_chat(
+                            base_url, msgs, model=api_model, system=system,
+                            num_ctx=num_ctx, think=think, tools=tools,
+                            options=options or None, api_key=api_key, timeout=_sub_timeout,
+                        )
+                        if not r2.get("error"):
+                            _log.info("Subagent %s: context retry succeeded at quota=%.2f", resolved_name, _cq)
+                            r = r2
+                            _ctx_retry_ok = True
+                            break
+                        _err_txt = str(r2.get("error"))
+                        _err_low = _err_txt.lower()
+                    except Exception as _cre:
+                        _err_txt = str(_cre)
+                        _err_low = _err_txt.lower()
+                if _ctx_retry_ok:
+                    # resume normal processing with new r
+                    pass
+                else:
+                    _pre_err = total_content
+                    total_content += f"[API error: {_err_txt}]"
+                    if not _pre_err.strip():
+                        _sv = _salvage_subagent_tool_results(msgs)
+                        if _sv:
+                            total_content = (
+                                f"[Teilergebnis: Subagent wurde unterbrochen]\n\n{_sv}"
+                            )
+                            _log.info("Subagent %s: salvaged %d chars after all ctx-retries failed", resolved_name, len(_sv))
+                    break
+            else:
+                # Salvage: wenn noch kein brauchbarer content da ist, aus tool-results rekonstruieren
+                _pre_err = total_content
+                total_content += f"[API error: {_err_txt}]"
+                if not _pre_err.strip():
+                    _sv = _salvage_subagent_tool_results(msgs)
+                    if _sv:
+                        total_content = (
+                            f"[Teilergebnis: Subagent wurde unterbrochen]\n\n{_sv}"
+                        )
+                        _log.info("Subagent %s: salvaged %d chars from tool results after API error", resolved_name, len(_sv))
+                break
         msg = r.get("message") or {}
         if msg.get("thinking"):
             total_thinking += msg["thinking"]
@@ -3459,11 +3762,54 @@ def _run_subagent_with_tools(
                 if _cu_r.get("error"): _cu_parts.append(f"error: {_cu_r['error']}")
                 tool_result = "\n".join(_cu_parts)
             elif tc_name == "read_url":
-                _ru_r = tool_read_url(tc_args.get("url", ""), config=config, proxy=tc_args.get("proxy"), js=bool(tc_args.get("js", False)))
+                _ru_url = tc_args.get("url", "")
+                _ru_r = tool_read_url(
+                    _ru_url, config=config,
+                    proxy=tc_args.get("proxy"), js=bool(tc_args.get("js", False)),
+                    max_chars=None,
+                )
                 _ru_conn = _ru_r.get("connection", "")
                 if _ru_r.get("ok"):
                     _ru_content = _ru_r.get("content", "")
-                    tool_result = f"[connection: {_ru_conn}]\n{_ru_content}" if _ru_conn else _ru_content
+                    _ru_tokens = _estimate_tokens(_ru_content)
+                    _from_cache = bool(_ru_r.get("from_cache"))
+                    if _ru_tokens > 15000 and user_msg:
+                        _log.info("Subagent %s: read_url %s = %d tok → compress (task-aware)",
+                                  resolved_name, _ru_url, _ru_tokens)
+                        try:
+                            _compress_system = (
+                                "Extrahiere aus dem webseiten-text alle infos relevant für die TASK.\n"
+                                "VERBATIM erhalten: URLs, zahlen, preise, versionen, zitate, code, error-messages, datum.\n"
+                                "Drop: navigation, cookie-banner, ads, related-posts, footer-links, boilerplate.\n"
+                                "Format: kompakte fakten-liste, keine einleitung. Max ~5000 tokens output.\n"
+                                "Antworte in der sprache der quelle."
+                            )
+                            _compress_msg = (
+                                f"TASK:\n{user_msg}\n\nURL: {_ru_url}\n\nRAW CONTENT:\n{_ru_content}"
+                            )
+                            _cr = ollama_chat(
+                                base_url,
+                                [{"role": "user", "content": _compress_msg}],
+                                model=api_model, system=_compress_system,
+                                num_ctx=num_ctx, options=options or None, api_key=api_key,
+                                timeout=600.0,
+                            )
+                            _compressed = ((_cr.get("message") or {}).get("content") or "").strip()
+                            if _compressed:
+                                _src = "cache" if _from_cache else (_ru_conn or "fetch")
+                                tool_result = (
+                                    f"[compressed {_ru_tokens}→{_estimate_tokens(_compressed)} tok, "
+                                    f"src: {_src}, url: {_ru_url}]\n{_compressed}"
+                                )
+                            else:
+                                tool_result = _ru_content[:24000] + "\n\n[... truncated (compress empty) ...]"
+                        except Exception as _ce:
+                            _log.warning("Subagent %s: compress failed for %s (%s) — hard trim",
+                                         resolved_name, _ru_url, _ce)
+                            tool_result = _ru_content[:24000] + "\n\n[... truncated (compress error) ...]"
+                    else:
+                        _prefix = "[cache hit] " if _from_cache else ""
+                        tool_result = f"{_prefix}[connection: {_ru_conn}]\n{_ru_content}" if _ru_conn else f"{_prefix}{_ru_content}"
                 else:
                     _ru_err = _ru_r.get("error", "unknown error")
                     tool_result = f"[connection: {_ru_conn}] Error reading URL: {_ru_err}" if _ru_conn else f"Error reading URL: {_ru_err}"
@@ -3472,6 +3818,10 @@ def _run_subagent_with_tools(
             _aal.log_tool_call(config, f"subagent:{tc_name}", tc_args, tool_result)
             msgs.append({"role": "tool", "content": str(tool_result)})
         rounds_used += 1
+        # Proaktive rolling summary mit cooldown
+        msgs = _maybe_rolling_summary(
+            msgs, user_msg, api_key, api_model, base_url, _sub_timeout, resolved_name, _rolling_cooldown,
+        )
     # Stuck-Prevention: wenn nach Tool-Runden kein Content, Nudge senden
     if not total_content.strip() and rounds_used > 0:
         _log.info("Subagent %s: empty content after %d tool rounds — sending nudge", resolved_name, rounds_used)
@@ -3849,6 +4199,7 @@ def chat_round(
     Gibt (content, thinking, new_messages, debug_info, switch_info) zurück.
     switch_info = {"model": str, "reason": str} wenn auf Fallback gewechselt wurde.
     """
+    system_prompt = refresh_datetime_in_prompt(system_prompt)
     tools_schema = get_tools_schema(config)
     debug = (config.get("server") or {}).get("debug", False)
     models_cfg = config.get("models") or {}
@@ -4238,6 +4589,7 @@ def chat_round_stream(
     | {"type": "tool_call"} | {"type": "status", "message": str}
     | {"type": "done", "thinking", "content", "new_messages", "debug_info", "switch_info"}.
     """
+    system_prompt = refresh_datetime_in_prompt(system_prompt)
     tools_schema = get_tools_schema(config)
     models_cfg = config.get("models") or {}
     per_prov_fb = [resolve_model(config, fb) or fb for fb in (models_cfg.get("fallbacks") or []) if fb]
