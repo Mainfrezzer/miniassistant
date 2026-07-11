@@ -37,6 +37,43 @@ GROUP_ALLOWED_TOOLS = frozenset({
 DEFAULT_GROUP_TOOLS = ("web_search", "read_url", "check_url", "send_image", "read_recent_messages", "search_chat_history", "get_user_profile")
 
 
+# Per-User-Tageslimit: in-memory Zähler {(platform:room, sender): (iso-date, count)}.
+# Reset bei Restart und Datumswechsel — bewusst keine Persistenz (Limit ist Spam-Bremse,
+# kein Abrechnungssystem).
+_daily_counts: dict[tuple[str, str], tuple[str, int]] = {}
+
+
+def check_user_daily_limit(config: dict[str, Any], platform: str, target_id: str | None, sender: str) -> tuple[bool, bool, int | None]:
+    """Per-User-Tageslimit aus room_settings.user_daily_limit (0/fehlt = unbegrenzt).
+    Zählt die Nachricht wenn erlaubt. Rückgabe (allowed, notify, warn_remaining):
+    - notify=True nur bei der ERSTEN abgelehnten Nachricht des Tages — danach still verwerfen.
+    - warn_remaining: verbleibende Nachrichten NACH dieser, wenn room_settings.user_daily_limit_warn
+      gesetzt und remaining <= warn — sonst None. Caller injiziert damit einen Hinweis in den
+      Model-Kontext (Model formuliert in User-Sprache)."""
+    rs = get_room_settings(config, platform, target_id)
+    try:
+        limit = int(rs.get("user_daily_limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0:
+        return True, False, None
+    try:
+        warn = int(rs.get("user_daily_limit_warn") or 0)
+    except (TypeError, ValueError):
+        warn = 0
+    import datetime
+    today = datetime.date.today().isoformat()
+    key = (f"{platform}:{target_id}", sender)
+    day, cnt = _daily_counts.get(key, (today, 0))
+    if day != today:
+        cnt = 0
+    _daily_counts[key] = (today, cnt + 1)
+    if cnt >= limit:
+        return False, cnt == limit, None
+    remaining = limit - (cnt + 1)
+    return True, False, remaining if (warn > 0 and remaining <= warn) else None
+
+
 def get_room_settings(config: dict[str, Any], platform: str, target_id: str | None) -> dict[str, Any]:
     """Liest room_settings (matrix) bzw. channel_settings (discord) für einen konkreten Raum/Channel.
     Gibt {} zurück wenn nichts konfiguriert → fällt zurück auf Agent-Mode."""
@@ -180,10 +217,15 @@ AUTO_CONTEXT_DEFAULT_COUNT = 3
 AUTO_CONTEXT_DEFAULT_MAX_CHARS = 200
 AUTO_CONTEXT_MAX_COUNT = 20
 AUTO_CONTEXT_MAX_CHARS_CAP = 5000
+# Nachrichten älter als das fliegen KOMPLETT aus dem Auto-Context (statt nur Pausen-Marker).
+# Alte Themen/Prompts im Kontext sind der Hauptköder für das 35B, alte Tasks wieder aufzugreifen.
+AUTO_CONTEXT_DEFAULT_MAX_AGE_MIN = 360   # 6h; 0 = kein Limit
+AUTO_CONTEXT_MAX_AGE_MIN_CAP = 10080     # 7 Tage
 
 
-def get_auto_context_settings(room_settings: dict[str, Any]) -> tuple[int, int]:
-    """Liest auto_context_count / auto_context_max_chars aus room_settings, mit Defaults & Hard-Caps."""
+def get_auto_context_settings(room_settings: dict[str, Any]) -> tuple[int, int, int]:
+    """Liest auto_context_count / auto_context_max_chars / auto_context_max_age_min
+    aus room_settings, mit Defaults & Hard-Caps. max_age_min=0 → kein Alterslimit."""
     raw_count = room_settings.get("auto_context_count")
     if raw_count is None:
         count = AUTO_CONTEXT_DEFAULT_COUNT
@@ -200,10 +242,19 @@ def get_auto_context_settings(room_settings: dict[str, Any]) -> tuple[int, int]:
             max_chars = max(20, min(int(raw_max), AUTO_CONTEXT_MAX_CHARS_CAP))
         except (TypeError, ValueError):
             max_chars = AUTO_CONTEXT_DEFAULT_MAX_CHARS
-    return count, max_chars
+    raw_age = room_settings.get("auto_context_max_age_min")
+    if raw_age is None:
+        max_age_min = AUTO_CONTEXT_DEFAULT_MAX_AGE_MIN
+    else:
+        try:
+            max_age_min = max(0, min(int(raw_age), AUTO_CONTEXT_MAX_AGE_MIN_CAP))
+        except (TypeError, ValueError):
+            max_age_min = AUTO_CONTEXT_DEFAULT_MAX_AGE_MIN
+    return count, max_chars, max_age_min
 
 
-def format_auto_context(messages: list[dict[str, Any]], max_chars: int, bot_sender: str = "") -> str:
+def format_auto_context(messages: list[dict[str, Any]], max_chars: int, bot_sender: str = "",
+                        max_age_min: int = 0) -> str:
     """Baut den Auto-Context-Block aus einer Nachrichtenliste (älteste→neueste).
     Truncated jede Nachricht auf max_chars Zeichen mit '…[truncated N/M]'.
     Bot-eigene Nachrichten werden BEHALTEN aber als '[du selbst]' markiert — damit Bot in stateless
@@ -214,6 +265,13 @@ def format_auto_context(messages: list[dict[str, Any]], max_chars: int, bot_send
         return ""
     import datetime as _dt
     now = _dt.datetime.now()
+    # Age-Cutoff: zu alte Nachrichten ganz raus — was nicht im Kontext steht,
+    # kann das Modell auch nicht als altes Thema wieder aufgreifen.
+    if max_age_min > 0:
+        _cutoff_ms = (now.timestamp() - max_age_min * 60) * 1000
+        messages = [m for m in messages if (m.get("ts") or 0) >= _cutoff_ms]
+        if not messages:
+            return ""
     today = now.date()
     yesterday = today - _dt.timedelta(days=1)
     _GAP_SECONDS = 7200  # >2h zwischen zwei Nachrichten ⇒ wahrscheinlich anderes Gespräch
@@ -278,16 +336,19 @@ def format_auto_context(messages: list[dict[str, Any]], max_chars: int, bot_send
 CURRENT_MSG_MARKER = "[Current message from"
 
 
-def wrap_current_message(blk: str, who: str, user_message: str) -> str:
+def wrap_current_message(blk: str, who: str, user_message: str, images_block: str = "") -> str:
     """Prepend auto-context history, then a hard separator + the current message.
 
     The 35B orchestrator otherwise grabs a long, complete-looking prompt sitting in
     the history (e.g. a previous image prompt) and re-runs THAT instead of the new
     request. This makes the boundary explicit: history above = read-only background,
-    the message below = the ONLY task to act on right now. English on purpose."""
+    the message below = the ONLY task to act on right now. English on purpose.
+
+    images_block (room_images.format_block): actionable image paths — sits BELOW the
+    read-only directive so the model may use those paths, unlike history content."""
     directive = (
         "[The block above is BACKGROUND HISTORY ONLY — read-only context.\n"
         " Do NOT reuse, copy, or re-send any prompt, image-prompt, or instruction from it.\n"
         " Act ONLY on the current message below. It is the task to do RIGHT NOW.]\n"
-    )
-    return f"{blk}{directive}{CURRENT_MSG_MARKER} {who}]:\n{user_message}"
+    ) if blk else ""
+    return f"{blk}{directive}{images_block}{CURRENT_MSG_MARKER} {who}]:\n{user_message}"

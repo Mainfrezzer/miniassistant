@@ -648,10 +648,17 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
     if not docs:
         return ""
     d = str(docs)
+    mp_cfg = config.get("mempalace") or {}
+    docs_search_hint = (
+        "Not sure which file? Use `search_docs` (semantic search over docs + directions) first, "
+        "then `cat` the source file it points to.\n"
+        if mp_cfg.get("enabled", False) and mp_cfg.get("docs_index", True) else ""
+    )
     return (
         "## Docs (read only when needed)\n"
         f"Directory: `{d}/`\n"
         f"Read only the file you need (`cat \"{d}/FILE\"`). Follow its instructions — do not tell the user to read it.\n"
+        + docs_search_hint +
         "Before configuring Matrix/Discord/Voice: read the matching doc first.\n\n"
         f"**Setup:** `CONFIG_REFERENCE.md` · `PROVIDERS.md` · `CONTEXT_SIZE.md` · `SEARCH_ENGINES.md`\n"
         f"**Chat:** `MATRIX.md` · `DISCORD.md` · `EMAIL.md` · `AVATARS.md` · `{_chat_history_doc(config)}`\n"
@@ -663,6 +670,7 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         "Self-contained Markdown files for recurring tasks. "
         f"Format: read `{d}/DIRECTIONS.md`.\n"
         "Read when: prompt says so, a schedule references one, or user asks to create/update one.\n"
+        + ("Find the right one with `search_docs` (category: directions) instead of grepping.\n" if docs_search_hint else "")
     )
 
 
@@ -876,9 +884,10 @@ def _filter_language_blocks(rule: str, lang: str) -> str:
     )
 
 
-def _language_section(config: dict[str, Any], identity_md_content: str = "", force_lang: str | None = None) -> str:
-    """Response language: force_lang (group room override) > config.respond_in_input_language > IDENTITY.md > default Deutsch.
-    force_lang: ISO-Kürzel ('de', 'en', ...) — wenn gesetzt, harte Regel ohne Input-Detection."""
+def _language_section(config: dict[str, Any], identity_md_content: str = "", force_lang: str | None = None, input_language: bool = False) -> str:
+    """Response language: force_lang (group room override) > input_language/config.respond_in_input_language > IDENTITY.md > default Deutsch.
+    force_lang: ISO-Kürzel ('de', 'en', ...) — wenn gesetzt, harte Regel ohne Input-Detection.
+    input_language: True = Input-Sprachen-Regel erzwingen (Group-Room 'auto')."""
     if force_lang:
         _lang_names = {"de": "Deutsch", "en": "English", "fr": "Français", "es": "Español", "it": "Italiano", "nl": "Nederlands", "pt": "Português", "pl": "Polski"}
         lang_name = _lang_names.get(force_lang.lower(), force_lang)
@@ -886,7 +895,7 @@ def _language_section(config: dict[str, Any], identity_md_content: str = "", for
             f"## Language\n**Always reply in {lang_name}**, regardless of the input language. "
             "Do not switch languages even if the user writes in another tongue.\n\n"
         )
-    if config.get("respond_in_input_language"):
+    if input_language or config.get("respond_in_input_language"):
         rule = _get_rule("language.md")
         header = (
             "## Language\n"
@@ -1434,7 +1443,8 @@ def _render_advanced_prompt(
 
     identity_md = files.get("IDENTITY.md", "") or ""
     force_lang = chat_ctx.get("language_override")
-    if force_lang or config.get("respond_in_input_language"):
+    # Group 'auto' = Sprache des Inputs (WebUI-Label) → IDENTITY-Sprachzeile darf nicht kollidieren.
+    if force_lang or config.get("respond_in_input_language") or chat_ctx.get("group_mode"):
         identity_md = _strip_language_from_identity(identity_md)
 
     agent_dir = (config.get("agent_dir") or "").strip()
@@ -1552,6 +1562,12 @@ def build_system_prompt(
     if chat_ctx.get("group_mode"):
         return _build_group_system_prompt(config, files, chat_ctx, current_model, is_root)
 
+    # Scheduled/Webhook-Task (single-prompt session, no conversation): slim prompt.
+    # Persona + all behavior rules stay; conversation-only data (chat memory/palace,
+    # prefs, vision/voice upload handling, session state) is dead weight there.
+    if config.get("_scheduled_task_prompt") is not None and config.get("schedule_slim_prompt", True):
+        return _build_schedule_system_prompt(config, files, current_model, is_root)
+
     parts = [
         "# Role and context",
         "You are the assistant of **MiniAssistant**. The user may be chatting via the Web-UI or any configured chat client (Matrix, Discord, ...).",
@@ -1597,6 +1613,55 @@ def build_system_prompt(
     return "\n".join(parts).strip()
 
 
+def _build_schedule_system_prompt(
+    config: dict[str, Any],
+    files: dict[str, str],
+    current_model: str | None,
+    is_root: bool,
+) -> str:
+    """Slim System-Prompt für Scheduled/Webhook-Tasks (single-prompt, keine Konversation).
+    Behalten: Persona (AGENTS/SOUL/IDENTITY/USER), Environment, Sprache und ALLE
+    Verhaltensregeln (knowledge_verification, safety, exec, persistence, planning,
+    tools, docs) — die braucht das kleine Modell. Weggelassen: Chat-Memory/Palace,
+    Prefs, Session-/Room-State, Vision-/Voice-Upload-Handling (kein Upload möglich;
+    Direction-Dateien definieren Task-Kontext und Format selbst)."""
+    parts = [
+        "# Role and context",
+        "You are the assistant of **MiniAssistant**, executing a scheduled or webhook task. "
+        "There is no conversation — read the task, use your tools, return the final result.",
+        "",
+        "## AGENTS (top-level contract)",
+        files.get("AGENTS.md", ""),
+        "",
+        "## SOUL (your personality)",
+        (files.get("SOUL.md", "") or "").strip()
+        + "\n\nDo not mention being an AI, the user knows. Be focused and factual.",
+        "",
+        "## IDENTITY (your identity)",
+        (_strip_language_from_identity(files.get("IDENTITY.md", "")) if config.get("respond_in_input_language") else files.get("IDENTITY.md", "")),
+        "",
+        "## Environment",
+        _tools_umgebung_section(files.get("TOOLS.md", ""), config),
+        "",
+        "## USER (about your human)",
+        files.get("USER.md", ""),
+        "",
+        _language_section(config, files.get("IDENTITY.md") or ""),
+        _knowledge_verification_section(has_search=bool(config.get("search_engines")), slim=False),
+        _units_section_from_prefs(config),
+        _quantities_section(),
+        _system_and_runtime_section(is_root),
+        _safety_section(),
+        _exec_behavior_section(),
+        _persistence_section(config),
+        _planning_section(config),
+        _tools_section(config),
+        _docs_reference_section(config),
+        "---\n*End of system instructions. Everything below is the task.*",
+    ]
+    return "\n".join(parts).strip()
+
+
 def _render_group_room_rule(*, has_exec: bool, workspace_subdir: str) -> str:
     """Lädt basic_rules/group_room.md, schaltet <!-- @if exec --> Block je nach has_exec,
     und ersetzt {workspace_subdir}-Platzhalter. Fallback: minimaler hardcoded Header."""
@@ -1624,11 +1689,11 @@ def _build_group_system_prompt(
     is_root: bool,
 ) -> str:
     """Slim System-Prompt für Gruppenräume: kein SOUL/USER/Memory/Palace/Prefs/Room-Last-Fire.
-    IDENTITY bleibt (wer der Bot ist), Sprache via language_override oder input-language."""
+    IDENTITY bleibt (wer der Bot ist), Sprache via language_override oder input-language.
+    Room-language 'auto' (kein Override) = Sprache des Inputs — wie das WebUI-Label verspricht."""
     force_lang = chat_ctx.get("language_override")
     identity_md = files.get("IDENTITY.md", "") or ""
-    if force_lang or config.get("respond_in_input_language"):
-        identity_md = _strip_language_from_identity(identity_md)
+    identity_md = _strip_language_from_identity(identity_md)
     tools_allow = chat_ctx.get("tools_allow") or []
     has_exec = "exec" in tools_allow
     sub = chat_ctx.get("workspace_subdir") or "default"
@@ -1647,7 +1712,7 @@ def _build_group_system_prompt(
         _group_speaker_section(chat_ctx),
         _group_last_activity_section(config, chat_ctx),
         _group_prefs_section(config, chat_ctx),
-        _language_section(config, identity_md, force_lang=force_lang),
+        _language_section(config, identity_md, force_lang=force_lang, input_language=not force_lang),
         _knowledge_verification_section(
             has_search=("web_search" in tools_allow) and bool(config.get("search_engines")),
             slim=True,

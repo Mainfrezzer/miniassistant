@@ -158,11 +158,16 @@ Web-UI und API (Bind-Adresse, **Port**, Token). Port und Host sind einstellbar (
 | `show_context` | boolean | nein | `false` | Wenn `true`: Vor jedem Ollama-Call wird der **vollständige Kontext** (System-Prompt, Messages, Token-Schätzung, verbleibende Tokens für Response/Thinking) in `$config_dir/logs/context.log` geschrieben. Format analog zu `agent_actions.log` mit Zeitstempel. Nützlich zum Debugging des Kontexts und Token-Budgets. |
 | `track_usage` | boolean | nein | `false` | Wenn `true`: Jeder LLM-Aufruf wird mit Zeitstempel, Modell, Typ und Dauer (Sekunden) in `$config_dir/usage/usage.csv` aufgezeichnet. Typen: `chat`, `vision`, `subagent`, `image` (Erfolg) sowie `chat_error`, `vision_error`, `subagent_error`, `image_error` (Timeout/Fehler – inkl. Retry-Zeit). Die Daten können in der Web-UI unter **Nutzung** (`/nutzung`) mit Zeitfiltern und Charts eingesehen werden. |
 | `rate_limit` | integer | nein | `100` | Maximale Anzahl Anfragen pro IP-Adresse **pro Minute** (Sliding-Window). Gilt für alle Endpunkte außer statischen Dateien. Bei Überschreitung: HTTP 429 mit `Retry-After: 60`. Auf `0` setzen zum Deaktivieren. |
-| `trust_forwarded` | boolean | nein | `false` | Nur hinter einem **vertrauenswürdigen** Reverse-Proxy auf `true` setzen. Dann werden `X-Forwarded-For`/`X-Real-IP` als echte Client-IP genutzt (für Rate-Limit und Brute-Force-Schutz). **Ohne diese Option** sieht der Server hinter einem Proxy jede Anfrage als von `127.0.0.1` kommend → alle Clients teilen sich einen Zähler, und ein einzelner Angreifer kann per fehlgeschlagener Logins **alle** Nutzer 1 h aussperren. **Niemals** ohne davorgeschalteten Proxy aktivieren, sonst kann jeder Client seine IP per Header fälschen. |
+| `log_rotate_mb` | integer | nein | `20` | Größen-Rotation für `agent_actions.log` (und Group-Tee-Logs): erreicht die Datei N MB, wird sie zu `.1` rotiert (`.1`→`.2` usw.). `0` = Rotation aus. Greift nur, wenn `log_agent_actions` aktiv ist (Rotation passiert beim Schreiben). |
+| `log_rotate_keep` | integer | nein | `3` | Anzahl behaltener rotierter Generationen (`.1` bis `.N`); ältere werden verworfen. |
+| `trust_forwarded` | boolean | nein | `false` | Nur hinter einem **vertrauenswürdigen** Reverse-Proxy auf `true` setzen. Dann werden `X-Forwarded-For`/`X-Real-IP` als echte Client-IP genutzt (für Rate-Limit und Brute-Force-Schutz). **Ohne diese Option** sieht der Server hinter einem Proxy jede Anfrage als von `127.0.0.1` kommend → alle Clients teilen sich einen Zähler, und ein einzelner Angreifer kann per fehlgeschlagener Logins **alle** Nutzer 1 h aussperren. **Niemals** ohne davorgeschalteten Proxy aktivieren, sonst kann jeder Client seine IP per Header fälschen. Läuft der Proxy auf einem **anderen Host** (Bind `0.0.0.0` nötig), stattdessen `trusted_proxies` verwenden. |
+| `trusted_proxies` | Liste | nein | `[]` | Peer-IPs, deren `X-Forwarded-For`/`X-Real-IP` akzeptiert wird (z. B. `["10.0.0.1"]` = IP des Reverse-Proxys). Sobald gesetzt, wird `trust_forwarded` **ignoriert**: Nur Requests, die direkt von einer dieser IPs kommen, dürfen forwarden — Direktzugriffe am Proxy vorbei können ihre IP damit **nicht** mehr fälschen und zählen mit ihrer echten Peer-IP. Der sichere Weg, wenn der Proxy auf einem anderen Host läuft und der Port deshalb auf `0.0.0.0` gebunden ist. |
 
 **Body-Size-Limits (fix):** Chat-, Onboarding-, OpenAI-compat-, Raw-Proxy- und Webhook-Endpoints akzeptieren bis zu **35 MB** (Bilder/Audio/Dokumente als base64). Config + andere `/api/*` Endpoints: **1 MB**. Bei Überschreitung: HTTP 413.
 
 **SSRF-Schutz:** `read_url`, `check_url`, `download_file` lehnen Requests zu privaten/Loopback-/Link-Local-/Cloud-Metadata-Hosts ab — auch wenn ein öffentlicher Host per Redirect dorthin verweist. Pro Redirect-Hop wird neu geprüft.
+
+**Keine API-Docs:** Die FastAPI-Auto-Dokumentation (`/docs`, `/redoc`, `/openapi.json`) ist deaktiviert — sie würde die komplette API-Struktur ohne Auth offenlegen.
 
 **Webhook-Token:** In der `/webhooks` UI wird der Token maskiert dargestellt (`xxxx…yyyy`). Plaintext nach Erstellung einmal per Alert, danach on-demand via Reveal-Button (Endpoint `GET /api/webhook/{wid}/token`, server.token-authed).
 
@@ -207,7 +212,7 @@ location /v1/ {
 
 Der Token muss bei jedem Request im Header mitgeschickt werden: `Authorization: Bearer <token>`.
 
-> **Wichtig hinter dem Proxy:** Damit Rate-Limit und Brute-Force-Schutz die echte Client-IP sehen, muss der Proxy `X-Forwarded-For`/`X-Real-IP` setzen (siehe `proxy_set_header` oben) **und** in der Config `server.trust_forwarded: true` gesetzt sein. Ohne beides zählt jeder Request gegen die Proxy-IP (`127.0.0.1`) — dann sperrt ein einzelner Angreifer alle Nutzer aus.
+> **Wichtig hinter dem Proxy:** Damit Rate-Limit und Brute-Force-Schutz die echte Client-IP sehen, muss der Proxy `X-Forwarded-For`/`X-Real-IP` setzen (siehe `proxy_set_header` oben) **und** in der Config entweder `server.trust_forwarded: true` (Proxy auf gleicher Maschine, Bind `127.0.0.1`) oder `server.trusted_proxies: ["<Proxy-IP>"]` (Proxy auf anderem Host, Bind `0.0.0.0`) gesetzt sein. Ohne beides zählt jeder Request gegen die Proxy-IP — dann sperrt ein einzelner Angreifer alle Nutzer aus.
 
 ---
 
@@ -328,6 +333,7 @@ Optional: ersetzt den plain-Markdown-Memory-Auszug durch **mempalace** — eine 
 | `language` | string/list | nein | (leer = `en`) | Sprache(n) für Entity-Detection (Person, Dialog, Topic). Eine Sprache als String (`de`), mehrere als Liste (`[de, en]`). Wirkt process-weit via `MEMPALACE_ENTITY_LANGUAGES` und persistiert in `~/.mempalace/config.json`. |
 | `palace_path` | string | nein | `agent_dir/mempalace/palace` | Alternativer ChromaDB-Pfad. |
 | `identity_path` | string | nein | `agent_dir/mempalace/identity.txt` | L0 Identity-Datei. |
+| `docs_index` | boolean | nein | `true` | Semantischer Docs-Index über `agent_dir/docs/` + `agent_dir/directions/` + `agent_dir/prefs/` (eigene Collection `docs_chunks` im selben Palace). Das LLM bekommt ein `search_docs`-Tool. Die Markdown-Dateien bleiben die einzige Quelle — der Index wird inkrementell per Content-Hash nachgezogen (Service-Start, Speichern im Vorgaben-Editor, 🔄-Button auf `/agent`, Freshness-Check vor jeder Suche). Nur wirksam wenn `mempalace.enabled: true`. |
 
 **Sprach-Hinweis:** Ohne `language` nutzt mempalace englische Entity-Patterns — Personen- und Themen-Erkennung auf deutschem Chatverlauf funktioniert dann schlechter. Für deutschsprachige Assistenten `language: de` setzen.
 
@@ -461,6 +467,10 @@ read_url:
 | `prefs_max_chars_per_file` | integer | nein | `1000` | Maximale Zeichen pro Pref-Datei; jede Datei wird vor dem Einbau auf dieses Limit gekuerzt. |
 | `respond_in_input_language` | boolean | nein | `false` | Wenn `true`: Antwortet automatisch in der Sprache des eingehenden Nutzerprompts (Spracherkennung). Überschreibt die `Response language` in IDENTITY.md. Nützlich bei Multi-User-Bots (Matrix/Discord) mit gemischten Sprachen. Default bleibt Deutsch wenn nicht gesetzt und IDENTITY.md keine Sprache vorgibt. |
 | `scheduler` | Objekt | nein | (nicht gesetzt) | Wenn `enabled: true`: Tool **schedule** verfuegbar. |
+| `stream_thinking_token_budget` | integer | nein | `3000` | Stream-Guard: max. Thinking-Tokens ohne Content/Tool-Call, danach Runden-Abbruch + Loop-Recovery. Bei ausführlich denkenden Modellen (z. B. 35B mit langen Directions) ggf. erhöhen (`6000`). `0` = aus. |
+| `stream_loop_freq_threshold` | integer | nein | `5` | Doom-Loop-Detektor: gleiche Zeile N× im 30-Zeilen-Fenster (`stream_loop_freq_window`) → Abbruch. Bei Output mit legitimen Wiederholungen (Changelogs mit gleichen Commit-Messages) ggf. erhöhen (`8`). |
+| `schedule_slim_prompt` | boolean | nein | `true` | Scheduled/Webhook-Tasks bekommen einen schlanken System-Prompt: Persona (SOUL/IDENTITY/USER), Environment und alle Verhaltensregeln bleiben; Chat-Memory/Palace, Prefs sowie Vision/Voice-Abschnitte entfallen (kein Chat-Kontext nötig, Directions definieren Format selbst). Spart ~2k Tokens pro Run. `false` = voller Prompt wie im Chat. |
+| `schedule_lazy_tools` | boolean | nein | `true` | Scheduled/Webhook-Tasks laden nur Core-Tool-Schemas (exec, web_search, read_url, invoke_model, send_image, …) plus per Keyword getriggerte Gruppen. In der Task referenzierte `directions/*.md` werden für den Keyword-Scan vorgelesen, damit dort verlangte Tools (z. B. email) geladen werden. `false` = alle Tool-Schemas wie bisher. |
 | `chat_clients` | Objekt | nein | (nicht gesetzt) | Chat-Client-Anbindungen (Matrix, Discord). Siehe unten. |
 
 ---
@@ -510,6 +520,29 @@ Chat-Clients werden unter `chat_clients:` konfiguriert. Momentan unterstuetzt: *
 **Nachrichten-Formatierung:** Discord unterstuetzt nativ Markdown - keine Konvertierung noetig.
 
 **Befehle:** `/model MODELLNAME` und `/models` funktionieren in Matrix und Discord. **`/new`** (neue Session, Verlauf leeren, Memory bleibt im Prompt) wirkt nur in **Web-UI und CLI** – in Matrix und Discord wird `/new` ignoriert (keine Antwort), da dort pro Nutzer ohnehin eine Session läuft. **Alle Befehle können auch mit `:` statt `/` eingegeben werden** (z.B. `:new`, `:model NAME`), was besonders auf Matrix-Mobile nützlich ist, da dort `/`-Befehle vom Client abgefangen werden.
+
+### Gruppenraeume: room_modes & room_settings (Matrix) / channel_modes & channel_settings (Discord)
+
+Am einfachsten ueber die **Web-UI unter `/rooms`** konfigurierbar (Zahnrad-Button pro Raum) — die Keys landen in der Config unter `chat_clients.matrix.room_settings.<room_id>` bzw. `chat_clients.discord.channel_settings.<channel_id>`.
+
+**Antwort-Modus** (`room_modes` / `channel_modes`): `always` | `mention` | `off` pro Raum. Default: `always` in DMs, `mention` in Gruppen. Bei `always` in Gruppen werden **Quote-Replies auf Nachrichten anderer User ignoriert** (Mensch-zu-Mensch), ausser der Bot ist erwaehnt oder die zitierte Nachricht stammt vom Bot. Raum-Betritte/-Austritte triggern den Bot nie.
+
+**room_settings / channel_settings** (pro Raum, alle optional):
+
+| Schluessel | Typ | Default | Beschreibung |
+|-----------|-----|---------|--------------|
+| `context` | `agent` \| `group` | `group` ab 3 Mitgliedern | `group` = schlanker Kontext ohne persoenliche Daten, `exec` sandboxed (bwrap). |
+| `language` | `auto`, `de`, `en`, ... | `auto` | Antwortsprache erzwingen. |
+| `tools_allow` | Liste | Auto-Default | Tool-Whitelist (nur Group-Mode-Tools erlaubt). |
+| `workspace_subdir` | string | aus Raum-ID | Workspace-Ordner unter `<workspace>/groups/`. |
+| `auto_context_count` | 0–20 | 3 | Vorherige Raum-Nachrichten als Kontext (0 = aus). |
+| `auto_context_max_chars` | 20–5000 | 200 | Truncate pro Kontext-Nachricht. |
+| `auto_context_max_age_min` | 0–10080 | 360 | Aeltere Nachrichten fliegen ganz raus (0 = kein Limit). |
+| `user_daily_limit` | 0–100000 | 0 | **Nachrichten pro User pro Tag** (0 = unbegrenzt). Drueber wird verworfen; ein Hinweis pro User/Tag, danach still. Zaehler in-memory: Reset um Mitternacht und bei Neustart. |
+| `user_daily_limit_warn` | 0–100 | 0 | Wenn ≤ N Nachrichten uebrig: Bot sagt dem User in dessen Sprache, wie viele noch (0 = keine Warnung). |
+| `docs_in_sandbox` | bool | false | Agent-Doku read-only nach `/docs/` mounten. |
+| `search_chat_history_max` | 10–500 | 200 | Scan-Limit fuer `search_chat_history`. |
+| `model_switch` / `models_allow` / `model` | — | aus | `/model`-Wechsel im Raum erlauben + Allowlist + Raum-Modell. |
 
 ### Auth-Flow (Matrix + Discord)
 
@@ -655,6 +688,8 @@ server:
   # trust_forwarded: true   # NUR hinter vertrauenswuerdigem Reverse-Proxy aktivieren
                             # (dann zaehlt Rate-Limit/Brute-Force gegen die echte Client-IP).
                             # Ohne Proxy weglassen — sonst kann jeder Client seine IP faelschen.
+  # trusted_proxies:        # Proxy auf ANDEREM Host: nur diese Peer-IPs duerfen
+  #   - 10.0.0.1            # X-Forwarded-For/X-Real-IP setzen (trust_forwarded wird dann ignoriert).
 
 # Raw OpenAI Proxy (optional)
 raw_proxy:
@@ -1328,6 +1363,95 @@ miniassistant providers models deepseek --online  # Verfügbare Modelle abrufen
 miniassistant providers edit deepseek           # Provider bearbeiten
 miniassistant providers delete deepseek
 ```
+
+---
+
+## 15f. OpenCode als Coding-Connector
+
+MiniAssistant ist der **Orchestrator**; echte Coding-Aufgaben (Features implementieren, refactoren, Tests schreiben, Code-Review) werden an **[OpenCode](https://opencode.ai)** delegiert — einen spezialisierten Coding-Agenten mit eigenem Repo-Kontext, eigenen Modellen und eigener Auth.
+
+**Kein Provider im Sinne von `invoke_model`.** OpenCode wird über eigene Tools (`code_task*`) angesprochen, nicht als Subagent-Modell. Der Orchestrator delegiert, wartet nicht, und fragt bei Bedarf zurück.
+
+### Voraussetzungen
+
+1. OpenCode installieren (liegt üblicherweise unter `~/.opencode/bin/opencode`)
+2. In OpenCode Provider + Modelle konfigurieren: `~/.config/opencode/config.json` und `opencode auth login`.
+   **MiniAssistant speichert keinen Model-Key** — Auth gehört komplett OpenCode.
+
+> **Läuft OpenCode „hier"?** Ja: der `opencode`-Prozess läuft lokal auf **derselben Maschine** wie MiniAssistant (Aufruf via Subprocess `opencode run`). Die **Modell-Inferenz** kann lokal (z. B. llama-swap) oder remote (z. B. ollama-cloud) sein — je nach OpenCode-Provider. MiniAssistant startet nur den lokalen Prozess.
+
+### Konfiguration
+
+```yaml
+opencode:
+  enabled: true
+  default_repo: /root/miniassistant   # Repo, wenn der Task keins nennt
+  max_concurrent: 3                    # gleichzeitig laufende Jobs (Kosten/Last-Deckel)
+  max_runtime: 1200                    # Sekunden pro Job, danach Kill (timeout)
+  max_retries: 2                       # Auto-Retry NUR bei timeout/crash
+  presets:                             # benannte Model-/Agent-Bündel
+    coder:
+      model: ollama/qwen3-coder-next-80b
+    reviewer:
+      model: ollama-cloud/deepseek-v4-pro
+```
+
+Alle Keys optional außer `enabled`. Ist `enabled` nicht gesetzt/false, erscheinen die `code_task*`-Tools **gar nicht** im Schema.
+
+- `default_repo` — absoluter Pfad zum git-Repo; der Orchestrator kann pro Task ein anderes `repo` übergeben.
+- `presets.<name>.model` — Format `provider/model` (aus `opencode models`). `<name>.agent` optional (OpenCode-Agent), `<name>.max_runtime` überschreibt global.
+- `jobs_dir` — wo Job-Registry + Logs liegen (Default `~/.miniassistant/opencode_jobs`).
+- `attach_url` — leer = lokaler Subprocess. Gesetzt (z. B. `http://host:4096`) = **Remote-Modus** (s. u.).
+
+### Remote OpenCode (andere Maschine)
+
+Der Connector kann OpenCode auch auf einem **anderen Host** ansprechen:
+
+1. Auf dem Remote-Host: `opencode serve --hostname 0.0.0.0 --port 4096` (dort liegen Repos + Auth + Modelle).
+2. In MiniAssistant: `opencode.attach_url: http://REMOTE:4096`.
+
+Der Connector ruft dann `opencode run --attach <url> --dir <repo>` — `repo`/`--dir` ist der Pfad **auf dem Remote**. Sessions/Kontext liegen auf dem Remote-Server; Job-Status/Follow-up funktionieren normal über die Registry. **Nicht** im Remote-Modus: lokale git-worktree-Isolation und `git diff --stat` (das ist Sache des Remote-Hosts).
+
+### Agents / Skills
+
+OpenCode hat ein eigenes **Agent-System** (`opencode agent create` / `opencode agent list`, Definitionen in OpenCodes Config bzw. `AGENTS.md`). Ein Agent bündelt Instruktionen + erlaubte Tools = de facto eine „Skill". Der Orchestrator wählt pro Task einen Agent über den `agent`-Parameter (oder ein `preset` mit `agent:`). Die Skills/Agents selbst werden **in OpenCode** gepflegt, nicht in MiniAssistant — MiniAssistant nennt nur den Namen.
+
+### Tools (für den Orchestrator)
+
+| Tool | Zweck |
+|------|-------|
+| `code_task(prompt, repo?, model?, preset?)` | Task starten → gibt sofort `job_id` zurück (läuft im Hintergrund, in eigenem git-worktree) |
+| `code_task_status(job_id)` | Status (`running`/`done`/`failed`/`timeout`/`crashed`) + `git diff --stat` + Ergebnis-Text + `session_id` |
+| `code_task_followup(job_id, prompt)` | Nachfrage in **derselben** OpenCode-Session (Kontext bleibt) → neuer `job_id` |
+| `code_task_list()` | Alle Jobs auflisten |
+| `code_task_cancel(job_id)` | Laufenden Job killen |
+
+### Ablauf
+
+1. Orchestrator ruft `code_task(...)` → Job startet detached in einem **git-worktree** (Prod-Baum bleibt unberührt), `job_id` kommt sofort zurück.
+2. Orchestrator **wartet nicht**, sondern pollt `code_task_status`.
+3. OpenCode kann während des Laufs **nicht** zurückfragen. Enthält das Ergebnis eine Frage/Unsicherheit, entscheidet der Orchestrator selbst **oder fragt den User** (Matrix/Discord).
+4. Antwort → `code_task_followup(job_id, antwort)` → **gleiche Session**, OpenCode macht mit vollem Kontext weiter.
+
+### Sessions & mehrtägige Projekte
+
+- **Ein `code_task` = eine neue Session** (frischer Gesprächs-Kontext). `code_task_followup` **setzt dieselbe Session fort**.
+- OpenCode-Sessions liegen **dauerhaft** in `opencode.db` → eine `session_id` von Tag 1 ist an Tag 3 noch fortsetzbar.
+- **Zusammenhängende Arbeit über Tage → immer `code_task_followup` auf dieselbe `job_id`** (nicht jedes Mal ein neues `code_task`). Sonst verliert OpenCode den *Reasoning*-Kontext (getroffene Entscheidungen, Zwischenstände).
+- **Unabhängige Tasks → jeweils neues `code_task`** (getrennte Sessions, damit sich Kontexte nicht vermischen).
+- Wichtig: OpenCode liest bei **jedem** Lauf den **aktuellen Code von der Platte**. Ein frischer Task verliert also nur das *Gespräch*, nicht den Code-Stand — für bereits committete Arbeit ist eine neue Session unkritisch.
+
+### Sicherheit / Isolation
+
+- Jeder Job läuft in einem eigenen **git-worktree** (`--detach` von HEAD) → parallele Edits kollidieren nicht, Prod-Baum bleibt sauber.
+- **Restart-fest:** Der Bot hält kein Prozess-Handle über Neustarts. Jobs schreiben ihren Exit-Code in eine Sentinel-Datei; Status wird aus Sentinel + PID-Liveness (Prozessgruppe) rekonstruiert.
+- **Deckel:** `max_concurrent` (Last/Kosten), `max_runtime` (Kill bei Überlauf), `max_retries` (Auto-Retry nur bei `timeout`/`crash`, **nicht** bei `failed` — rote Tests brauchen einen korrigierten Prompt, kein blindes Re-Run).
+
+### Vorteile ggü. `exec` im Hauptagent
+
+- Spezialisierter Coding-Kontext (OpenCode baut eine Repo-Map, kennt die Struktur) statt blinder File-Ops.
+- Eigenes Coding-Modell (z. B. qwen-coder) statt Generalist-Orchestrator.
+- Der Orchestrator bleibt **schlank** — Diffs/Code fressen nicht sein Kontext-Fenster.
 
 ---
 

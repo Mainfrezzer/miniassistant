@@ -214,16 +214,28 @@ In der Config `server.host: "0.0.0.0"` setzen (miniassistant config oder YAML). 
 Wird MiniAssistant nur via Reverse-Proxy ins Internet gestellt (empfohlen), bind weiter auf `127.0.0.1` und beachte:
 
 - **`server.trust_forwarded: true` setzen.** Sonst sieht der Server jede Anfrage als vom Proxy kommend (`127.0.0.1`) — dann teilen sich *alle* Clients einen Rate-Limit- und Brute-Force-Zähler, und ein einzelner Angreifer kann mit fehlgeschlagenen Logins **alle** Nutzer für 1 h aussperren. Nur aktivieren, wenn wirklich ein vertrauenswürdiger Proxy davorsitzt (sonst kann jeder Client seine IP per Header spoofen).
+- **Proxy auf anderem Host** (Bind muss `0.0.0.0` bleiben): stattdessen `server.trusted_proxies: ["<Proxy-IP>"]` setzen. Forwarded-Header werden dann nur akzeptiert, wenn der Request direkt vom Proxy kommt — Direktzugriffe am Proxy vorbei können ihre IP nicht fälschen. Details: [CONFIGURATION.md](CONFIGURATION.md) §3.
 - **Der Proxy muss die echte Client-IP weiterreichen.** Im Nginx-Beispiel oben zusätzlich:
   ```nginx
   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
   proxy_set_header X-Forwarded-Proto $scheme;
   ```
-- **`server.rate_limit`** (Requests/Minute pro IP für `/` und `/v1`, Default `100`, `0` = aus) und **`raw_proxy.rate_limit`** greifen erst sinnvoll, wenn `trust_forwarded` aktiv ist — sonst zählt alles gegen die Proxy-IP.
+- **`server.rate_limit`** (Requests/Minute pro IP für `/` und `/v1`, Default `100`, `0` = aus) und **`raw_proxy.rate_limit`** greifen erst sinnvoll, wenn `trust_forwarded` bzw. `trusted_proxies` aktiv ist — sonst zählt alles gegen die Proxy-IP.
 
 ## System-Erkennung
 
 Die LLM erfährt automatisch, auf welchem System sie läuft (OS, Distribution, Paketmanager, Init-System), damit sie die passenden Befehle nutzt (z. B. apt vs dnf, systemctl vs service). Erkannt werden u. a. Debian/Ubuntu, Fedora/RHEL, Arch, Alpine, openSUSE, macOS.
+
+## Coding via OpenCode (Orchestrator-Modell)
+
+MiniAssistant ist der **Orchestrator**. Echte Coding-Aufgaben (Features, Refactoring, Tests, Code-Review) delegiert es an **[OpenCode](https://opencode.ai)** — einen spezialisierten Coding-Agenten mit eigenem Repo-Kontext, eigenen Modellen und eigener Auth. Opt-in via `opencode.enabled: true`.
+
+- **Asynchron:** `code_task(...)` startet den Job im Hintergrund (eigener git-worktree) und gibt sofort eine `job_id` zurück; der Orchestrator pollt mit `code_task_status` statt zu blockieren.
+- **Rückfragen:** OpenCode kann nicht mitten im Lauf fragen — steht eine Frage im Ergebnis, entscheidet der Orchestrator oder fragt den User; die Antwort geht via `code_task_followup` in **dieselbe Session** (Kontext bleibt, auch über Tage).
+- **Eigene Auth:** Modelle/Keys liegen in OpenCodes Config — MiniAssistant speichert keinen Model-Key. OpenCode läuft lokal auf derselben Maschine (Subprocess), die Inferenz kann lokal oder remote sein.
+- **Sicherheit:** worktree-Isolation, `max_concurrent`/`max_runtime`/`max_retries`-Deckel, restart-fest.
+
+Details: **[CONFIGURATION.md §15f](CONFIGURATION.md#15f-opencode-als-coding-connector)**.
 
 ## Sprache, Merken, Scheduler
 

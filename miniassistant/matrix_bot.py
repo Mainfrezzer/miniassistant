@@ -446,11 +446,15 @@ def fetch_recent_messages(room_id: str, limit: int = 20, skip_event_id: str | No
                     continue
                 content = src.get("content") or {}
                 msgtype = content.get("msgtype") or ""
-                # Nur Text/Notice; Bilder/Audio/Files separat behandeln (überspringen für jetzt)
-                if msgtype not in ("m.text", "m.notice", "m.emote"):
+                # Text/Notice normal; Bilder als Marker (Chronologie! "das letzte Bild" braucht
+                # den Bezugspunkt in der History — der Pfad kommt aus dem room_images-Block).
+                if msgtype not in ("m.text", "m.notice", "m.emote", "m.image"):
                     continue
                 sender = src.get("sender") or ""
-                body = (content.get("body") or "").strip()
+                if msgtype == "m.image":
+                    body = f"[📷 Bild: {(content.get('body') or 'image').strip()}]"
+                else:
+                    body = (content.get("body") or "").strip()
                 ts = src.get("origin_server_ts") or 0
                 # Display-Name aus room.users[uid]
                 display = ""
@@ -898,7 +902,7 @@ def _get_chat_response(
     # NICHT bei Slash-Befehlen (/new, /help, …): das Prepend würde den ^-verankerten
     # Command-Parser in handle_user_input aushebeln → Befehl landet als Prompt beim LLM.
     if ctx.get("group_mode") and room_id and not is_chat_command(user_message):
-        ac_count, ac_max = get_auto_context_settings(rs)
+        ac_count, ac_max, ac_age = get_auto_context_settings(rs)
         if ac_count > 0:
             try:
                 bot_user_id = getattr(_bot_client, "user_id", None) or getattr(_bot_client, "user", None) or ""
@@ -908,12 +912,14 @@ def _get_chat_response(
                 if prev and prev[-1].get("sender") == matrix_user_id and (prev[-1].get("body") or "").strip() == user_message.strip():
                     prev = prev[:-1]
                 prev = prev[-ac_count:] if len(prev) > ac_count else prev
-                blk = format_auto_context(prev, max_chars=ac_max, bot_sender=bot_user_id)
-                if blk:
+                blk = format_auto_context(prev, max_chars=ac_max, bot_sender=bot_user_id, max_age_min=ac_age)
+                from miniassistant.room_images import format_block as _ri_block
+                _img_blk = _ri_block(config, ctx)
+                if blk or _img_blk:
                     # Aktuelle Message explizit mit Sender-Marker wrappen — verhindert dass Bot
                     # den Request einem User aus dem Auto-Context zuschreibt (z.B. dem der zuerst @clawi mention'te).
                     _who_now = base_ctx.get("user_display") or matrix_user_id
-                    user_message = wrap_current_message(blk, _who_now, user_message)
+                    user_message = wrap_current_message(blk, _who_now, user_message, images_block=_img_blk)
             except Exception as _ac_err:
                 logger.debug("Matrix auto-context fetch failed: %s", _ac_err)
     session_key = _sess_key(room_id, matrix_user_id, bool(ctx.get("group_mode")))
@@ -1663,7 +1669,8 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
         if mode == "off":
             logger.debug("Matrix: Raum %s mode=off — ignoriert", room_id)
             return
-        if mode == "mention":
+        async def _directed_at_bot() -> bool:
+            """Mention-/Reply-auf-Bot-Erkennung. True wenn die Nachricht an den Bot gerichtet ist."""
             import re as _re_men
             source = getattr(event, "source", None) or {}
             src_content = source.get("content") or {} if isinstance(source, dict) else {}
@@ -1732,8 +1739,25 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                     or any(_re_men.search(r'(?:^|[^0-9a-z_])@' + _re_men.escape(_n) + r'(?:$|[^0-9a-z_])', _body_l)
                            for _n in _names if _n)
                 )
-            if not is_mentioned:
+            return is_mentioned
+
+        if mode == "mention":
+            if not await _directed_at_bot():
                 logger.debug("Matrix: Raum %s mode=mention – kein @mention/Reply-auf-Bot, ignoriert", room_id)
+                return
+        elif mode == "always" and len(room_members) > 2:
+            # Gruppe + always: echtes Quote-Reply auf fremde Nachricht ist Mensch-zu-Mensch —
+            # nur antworten wenn Bot gemeint (Mention oder Quote auf Bot-Nachricht).
+            # Thread-Nachrichten setzen m.in_reply_to nur als Fallback (is_falling_back) → kein Quote.
+            _src_a = getattr(event, "source", None) or {}
+            _sc_a = (_src_a.get("content") or {}) if isinstance(_src_a, dict) else {}
+            _rel_a = (_sc_a.get("m.relates_to") or {}) if isinstance(_sc_a, dict) else {}
+            _irt_a = (_rel_a.get("m.in_reply_to") or {}) if isinstance(_rel_a, dict) else {}
+            _real_quote = bool(isinstance(_irt_a, dict) and _irt_a.get("event_id")) and not (
+                _rel_a.get("rel_type") == "m.thread" and _irt_a.get("is_falling_back")
+            )
+            if _real_quote and not await _directed_at_bot():
+                logger.info("Matrix: Raum %s mode=always — Quote-Reply an anderen User, ignoriert", room_id)
                 return
 
         # /stop, /abort, /abbruch: Cancellation-Befehle abfangen.
@@ -1761,6 +1785,7 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             await _send_room_message(client, room_id, reply)
             return
         config_dir = config.get("_config_dir")
+        from miniassistant.group_rooms import check_user_daily_limit as _chk_daily_limit
         sender_authed = is_authorized("matrix", sender, config_dir)
         # Room-Trust: Bot wurde von authed User eingeladen → ganzer Raum vertraut.
         room_trusted = False
@@ -1782,6 +1807,13 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                 "MiniAssistant ist noch beschäftigt — bitte versuche es gleich nochmal "
                 "oder sende `/abort` bzw. `/abbruch` zum Abbrechen."
             )
+        elif not (_dl := _chk_daily_limit(config, "matrix", room_id, sender))[0]:
+            logger.info("Matrix: %s über Tageslimit in %s — Nachricht verworfen (notify=%s)", sender, room_id, _dl[1])
+            # Hinweis nur bei der ersten abgelehnten Nachricht des Tages, danach still.
+            reply = (
+                "Du hast dein tägliches Nachrichten-Limit in diesem Raum erreicht — "
+                "morgen geht's weiter."
+            ) if _dl[1] else None
         else:
             _busy_users.add(sender)
             try:
@@ -1834,6 +1866,13 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                     _doc_text = "\n\n".join(b for b in _doc_blocks if b)
                     if _doc_text:
                         body = f"{_doc_text}\n\n{body}".strip()
+                # Tageslimit-Warnung: als System-Notiz in den Model-Kontext — das Model
+                # formuliert den Hinweis selbst in der Sprache des Users.
+                if _dl[2] is not None:
+                    body += (
+                        f"\n\n[System notice: this user has {_dl[2]} message(s) left today in this room "
+                        f"(per-user daily limit). Briefly mention this at the end of your reply, in the user's language.]"
+                    )
                 # Typing-Indikator: Bot „tippt", solange er denkt/schreibt
                 room_typing = getattr(client, "room_typing", None)
                 typing_task: asyncio.Task | None = None

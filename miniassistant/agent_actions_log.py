@@ -14,13 +14,44 @@ from typing import Any
 
 _lock = threading.Lock()
 
+# Rotation settings (mb, keep) — refreshed from config by _log_paths, used by _write_all.
+# Module-global so _write_all keeps its config-free signature.
+_rot_settings: tuple[int, int] = (20, 3)
+
+
+def _rotate_if_needed(path: Path) -> None:
+    """Size-based rotation: log → log.1 → … → log.<keep>, oldest dropped. 0 MB = off.
+    Called under _lock, before each append — cost is one stat() per write."""
+    mb, keep = _rot_settings
+    if mb <= 0 or keep <= 0:
+        return
+    try:
+        if path.stat().st_size < mb * 1024 * 1024:
+            return
+    except OSError:
+        return
+    try:
+        for i in range(keep - 1, 0, -1):
+            src = Path(f"{path}.{i}")
+            if src.exists():
+                src.replace(Path(f"{path}.{i + 1}"))
+        path.replace(Path(f"{path}.1"))
+    except OSError:
+        pass
+
 
 def _log_paths(config: dict[str, Any]) -> list[Path]:
     """Gibt alle Log-Pfade zurück (leer wenn deaktiviert).
     - Owner-Mode: nur `agent_actions.log`.
     - Group-Mode: BEIDE — main `agent_actions.log` UND `logs/agent_actions_groups/<subdir>.log`
       (forensische Per-Room-Datei plus zentraler Audit-Stream)."""
-    if not (config.get("server") or {}).get("log_agent_actions"):
+    global _rot_settings
+    srv = config.get("server") or {}
+    try:
+        _rot_settings = (int(srv.get("log_rotate_mb", 20) or 0), int(srv.get("log_rotate_keep", 3) or 0))
+    except (TypeError, ValueError):
+        pass
+    if not srv.get("log_agent_actions"):
         return []
     config_dir = config.get("_config_dir") or ""
     if not config_dir:
@@ -46,6 +77,7 @@ def _log_path(config: dict[str, Any]) -> Path | None:
 
 def _write(path: Path, text: str) -> None:
     with _lock:
+        _rotate_if_needed(path)
         with open(path, "a", encoding="utf-8") as f:
             f.write(text)
 
@@ -57,6 +89,7 @@ def _write_all(paths: list[Path], text: str) -> None:
     with _lock:
         for p in paths:
             try:
+                _rotate_if_needed(p)
                 with open(p, "a", encoding="utf-8") as f:
                     f.write(text)
             except Exception:
@@ -90,20 +123,18 @@ def log_thinking(config: dict[str, Any], thinking: str) -> None:
 
 
 class StreamLogger:
-    """Akkumuliert Thinking/Content-Deltas und flusht periodisch ins Log.
-    Verhindert Disk-Thrashing bei schnellem Token-Stream."""
+    """Akkumuliert Thinking/Content-Deltas und schreibt sie erst bei finish() als
+    zusammenhängende THINKING/RESPONSE-Blöcke ins Log — gleiche Lesbarkeit wie der
+    non-stream Pfad. (Früher: periodischer Delta-Flush als STREAM_THINKING/STREAM_CONTENT
+    Fragmente — live mitlesbar, aber im Nachhinein kaum lesbar.)"""
 
     def __init__(self, config: dict[str, Any], flush_interval: float = 2.0):
         self._paths = _log_paths(config)
-        self._flush_interval = flush_interval
         self._thinking_buf = ""
         self._content_buf = ""
-        self._last_flush = 0.0
         self._started = False
         self._model = ""
         self._role = ""
-        import time as _time
-        self._time = _time
 
     def _label(self) -> str:
         parts = []
@@ -113,52 +144,58 @@ class StreamLogger:
             parts.append(self._model)
         return f"  {' '.join(parts)}" if parts else ""
 
-    def _maybe_flush(self, force: bool = False) -> None:
-        if not self._paths:
-            return
-        now = self._time.monotonic()
-        if not force and (now - self._last_flush) < self._flush_interval:
-            return
-        lbl = self._label()
-        parts = []
-        if self._thinking_buf:
-            t = self._thinking_buf if len(self._thinking_buf) <= 500 else "…" + self._thinking_buf[-500:]
-            parts.append(f"[{_ts()}] STREAM_THINKING{lbl}\n{t}\n")
-            self._thinking_buf = ""
-        if self._content_buf:
-            c = self._content_buf if len(self._content_buf) <= 500 else "…" + self._content_buf[-500:]
-            parts.append(f"[{_ts()}] STREAM_CONTENT{lbl}\n{c}\n")
-            self._content_buf = ""
-        if parts:
-            _write_all(self._paths, "".join(parts))
-        self._last_flush = now
-
     def start(self, model: str, role: str = "orchestrator") -> None:
         if not self._paths:
             return
         self._model = model
         self._role = role
-        _write_all(self._paths, f"[{_ts()}] STREAM_START  {role} model={model}\n")
+        self._thinking_buf = ""
+        self._content_buf = ""
         self._started = True
-        self._last_flush = self._time.monotonic()
 
     def thinking_delta(self, delta: str) -> None:
         self._thinking_buf += delta
-        self._maybe_flush()
 
     def content_delta(self, delta: str) -> None:
         self._content_buf += delta
-        self._maybe_flush()
+
+    def round_break(self) -> None:
+        """Schreibt den bisherigen Puffer als Block und leert ihn — vor Tool-Ausführung
+        gerufen, damit die Log-Reihenfolge THINKING → TOOL_START → TOOL_DONE stimmt."""
+        if not self._paths or not self._started:
+            return
+        lbl = self._label()
+        parts = []
+        if self._thinking_buf:
+            t = self._thinking_buf if len(self._thinking_buf) <= 2000 else self._thinking_buf[:2000] + "…"
+            parts.append(f"[{_ts()}] THINKING{lbl}\n{t}\n")
+        if self._content_buf:
+            parts.append(f"[{_ts()}] CONTENT{lbl}\n{self._content_buf}\n")
+        if parts:
+            _write_all(self._paths, "".join(parts))
+        self._thinking_buf = ""
+        self._content_buf = ""
 
     def finish(self, tps: tuple[float, bool] | None = None) -> None:
-        self._maybe_flush(force=True)
-        if self._paths and self._started:
-            if tps is not None:
-                value, exact = tps
-                tps_str = f"  ({value:.1f} t/s)" if exact else f"  (~{value:.1f} t/s)"
-            else:
-                tps_str = ""
-            _write_all(self._paths, f"[{_ts()}] STREAM_END{tps_str}\n")
+        if not self._paths or not self._started:
+            return
+        lbl = self._label()
+        parts = []
+        if self._thinking_buf:
+            t = self._thinking_buf if len(self._thinking_buf) <= 2000 else self._thinking_buf[:2000] + "…"
+            parts.append(f"[{_ts()}] THINKING{lbl}\n{t}\n")
+        if tps is not None:
+            value, exact = tps
+            tps_str = f"  ({value:.1f} t/s)" if exact else f"  (~{value:.1f} t/s)"
+        else:
+            tps_str = ""
+        if self._content_buf:
+            parts.append(f"[{_ts()}] RESPONSE{lbl}{tps_str}\n{self._content_buf}\n")
+        if parts:
+            _write_all(self._paths, "".join(parts))
+        self._thinking_buf = ""
+        self._content_buf = ""
+        self._started = False
 
 
 def extract_tps(response: dict[str, Any], elapsed_s: float, content: str = "", thinking: str = "") -> tuple[float, bool] | None:

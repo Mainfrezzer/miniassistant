@@ -183,6 +183,20 @@ def _run_prompt(
     from miniassistant.ollama_client import resolve_model
     if scheduled_prompt is not None:
         config["_scheduled_task_prompt"] = scheduled_prompt
+    # Lazy tools for scheduled runs: core tools + keyword-triggered groups only.
+    # Referenced direction files are pre-read for the keyword scan — the task text
+    # alone doesn't reveal tools the direction needs (it's only read via exec later).
+    if config.get("schedule_lazy_tools", True):
+        config["lazy_tools"] = True
+        agent_dir = Path(config.get("agent_dir") or "")
+        extra_parts = []
+        for m in re.finditer(r'directions/([\w\-.]+\.md)', prompt):
+            try:
+                extra_parts.append((agent_dir / "directions" / m.group(1)).read_text(encoding="utf-8", errors="replace")[:20000])
+            except OSError:
+                pass
+        if extra_parts:
+            config["_lazy_scan_extra"] = "\n".join(extra_parts)
     # Scheduled Tasks: höherer Timeout — Tool-Chains können lange dauern,
     # kein User wartet interaktiv. Default 3600s (1h), überschreibbar via schedule_timeout.
     config["api_timeout"] = float(config.get("schedule_timeout") or config.get("api_timeout") or 3600)

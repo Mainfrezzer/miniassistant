@@ -38,13 +38,19 @@ _PASSTHROUGH_TUNING_KEYS = (
     "doc_max_chars", "doc_max_pages_render", "doc_response_reserve",
     # Reliability/Context-Knobs: Guards + Lazy-Load + Reflection
     "url_hallucination_guard", "research_gate", "research_gate_max",
-    "research_gate_keywords", "lazy_tools", "research_reflection",
+    "lazy_tools", "research_reflection",
     "link_resolution_guard", "tool_call_dedup",
+    # Scheduled/Webhook-Tasks: Slim-Prompt (ohne Memory/Prefs/Vision) + Lazy-Tools
+    # (Core + Direction-Keywords). Beide default true.
+    "schedule_slim_prompt", "schedule_lazy_tools",
     # Image-Edit-Tuning: strength-Default (1.0 = voller Denoise, nötig damit qwen-image-edit
     # & Co. die Instruktion anwenden); max_edge cappt Quell-Auflösung.
     "image_edit_strength", "image_edit_max_edge",
     # Advanced/AIO-Prompt: {enabled: bool, file: path} — ersetzt den ganzen System-Prompt.
     "advanced_prompt", "knowledge_cutoff",
+    # OpenCode coding-connector: {enabled, default_repo, jobs_dir, max_concurrent,
+    #   max_runtime, max_retries, presets: {name: {model, agent, max_runtime}}}
+    "opencode",
 )
 
 # ---------------------------------------------------------------------------
@@ -434,7 +440,7 @@ def _normalize_matrix(matrix: Any) -> dict[str, Any] | None:
         if clean:
             out["room_modes"] = clean
     # Per-room group-mode settings: {room_id: {context, language, tools_allow, workspace_subdir,
-    #   auto_context_count, auto_context_max_chars, docs_in_sandbox}}
+    #   auto_context_count, auto_context_max_chars, docs_in_sandbox, user_daily_limit}}
     rs = m.get("room_settings")
     if isinstance(rs, dict) and rs:
         clean_rs = {str(k): v for k, v in rs.items() if isinstance(k, str) and isinstance(v, dict)}
@@ -671,8 +677,14 @@ def _merge_with_defaults(data: dict[str, Any]) -> dict[str, Any]:
             # X-Forwarded-For/X-Real-IP nur hinter vertrauenswürdigem Reverse-Proxy trusten.
             # Default False: ohne Proxy darf kein Client seine IP spoofen (Rate-Limit/Brute-Force-Bypass).
             "trust_forwarded": bool(server.get("trust_forwarded", False)),
+            # Peer-IPs, deren Forwarded-Header akzeptiert werden (Reverse-Proxy auf anderem
+            # Host). Gesetzt → nur diese Peers dürfen forwarden, trust_forwarded wird ignoriert.
+            "trusted_proxies": [str(p) for p in (server.get("trusted_proxies") or [])],
             # Requests/Minute pro IP für / und /v1 (0 = aus). raw_proxy hat eigenes Limit.
             "rate_limit": int(server.get("rate_limit", 100) or 0),
+            # Größen-Rotation für agent_actions.log (+ Group-Tees): ab N MB → .1/.2/…, 0 = aus.
+            "log_rotate_mb": int(server.get("log_rotate_mb", 20) or 0),
+            "log_rotate_keep": int(server.get("log_rotate_keep", 3) or 0),
             # Bekannte Config-Secrets im LLM-Output + Tool-Ergebnissen maskieren (Defense-in-Depth).
             "mask_secrets_in_output": bool(server.get("mask_secrets_in_output", True)),
             "debug": server.get("debug", False),  # true = Request/Response-JSON in API-Antwort
@@ -814,7 +826,10 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
             "port": config["server"].get("port", DEFAULT_BIND_PORT),
             "token": config["server"].get("token"),
             "trust_forwarded": bool(config["server"].get("trust_forwarded", False)),
+            "trusted_proxies": [str(p) for p in (config["server"].get("trusted_proxies") or [])],
             "rate_limit": int(config["server"].get("rate_limit", 100) or 0),
+            "log_rotate_mb": int(config["server"].get("log_rotate_mb", 20) or 0),
+            "log_rotate_keep": int(config["server"].get("log_rotate_keep", 3) or 0),
             "mask_secrets_in_output": bool(config["server"].get("mask_secrets_in_output", True)),
             "debug": config["server"].get("debug", False),
             "show_estimated_tokens": config["server"].get("show_estimated_tokens", False),

@@ -750,6 +750,30 @@ def _tools_schema(
                 },
             },
         })
+    # search_docs: nur wenn mempalace + docs_index aktiviert
+    if mp_cfg.get("enabled", False) and mp_cfg.get("docs_index", True):
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "search_docs",
+                "description": (
+                    "Semantic search over your own reference docs (agent docs/) and direction files (directions/). "
+                    "Use this to answer questions about your own features, configuration, or how-tos, and to find "
+                    "the right direction file for a recurring task — instead of grep/cat over the docs directory. "
+                    "Write the query in ENGLISH (the docs are English — translate the user's question first). "
+                    "Results are chunks with their source file path; read the full file with exec/cat if needed."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural language query (e.g. 'how to configure image generation', 'sonarr weekly search direction')"},
+                        "category": {"type": "string", "enum": ["docs", "directions", "prefs"], "description": "Optional filter: 'docs' = reference docs, 'directions' = task instructions, 'prefs' = user preference notes (full text — the prompt only carries a truncated excerpt). Omit for all."},
+                        "n_results": {"type": "integer", "description": "Number of chunks (default: 5, max: 10)"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        })
 
     # Email tools: nur anzeigen wenn konfiguriert
     from miniassistant.tools import _get_email_account_names
@@ -891,6 +915,85 @@ def _tools_schema(
                         "language": {"type": "string", "description": "Response language (default: Deutsch)"},
                     },
                     "required": ["topic", "perspective_a", "perspective_b", "model"],
+                },
+            },
+        })
+    # OpenCode coding-connector: orchestrator dispatches coding tasks to opencode
+    # (own context/sessions/auth). Async jobs — never block the chat turn.
+    if (config.get("opencode") or {}).get("enabled"):
+        _presets = list(((config.get("opencode") or {}).get("presets") or {}).keys())
+        _preset_hint = (" Named presets (model+agent bundles): " + ", ".join(_presets) + ".") if _presets else ""
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "code_task",
+                "description": (
+                    "Dispatch a CODING task to OpenCode (specialized coding agent with its own context, "
+                    "runs in a git worktree). Use for: implementing features, editing code, refactoring, "
+                    "writing tests, code review of a repo/diff. Returns a job_id IMMEDIATELY — the task runs "
+                    "in the background (minutes). Do NOT wait; poll with code_task_status. OpenCode cannot ask "
+                    "questions mid-run: if its result contains a question or uncertainty, YOU decide or ask the "
+                    "user, then send the answer via code_task_followup (same session, context preserved)." + _preset_hint
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "The coding task in plain language (what to do, not shell commands)."},
+                        "repo": {"type": "string", "description": "Absolute path to the git repo. Omit to use opencode.default_repo from config."},
+                        "model": {"type": "string", "description": "Optional provider/model override (e.g. 'ollama/qwen3-coder-next-80b'). Omit to use preset/opencode default."},
+                        "preset": {"type": "string", "description": "Optional named preset selecting model+agent (e.g. 'coder', 'reviewer')."},
+                    },
+                    "required": ["prompt"],
+                },
+            },
+        })
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "code_task_status",
+                "description": "Check a coding job. Returns status (running|done|failed|timeout|crashed), git diff --stat, "
+                    "elapsed time, session_id, and (when finished) opencode's result text. Poll this after code_task.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string", "description": "The job_id from code_task."}},
+                    "required": ["job_id"],
+                },
+            },
+        })
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "code_task_followup",
+                "description": "Send a follow-up message to a finished coding job in the SAME opencode session "
+                    "(context preserved). Use to answer opencode's questions, request changes, or continue the work. "
+                    "Returns a new job_id to poll.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string", "description": "The job_id whose session to continue."},
+                        "prompt": {"type": "string", "description": "The follow-up message / answer / next instruction."},
+                    },
+                    "required": ["job_id", "prompt"],
+                },
+            },
+        })
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "code_task_list",
+                "description": "List all coding jobs with their status. Use to see what is running / finished.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "code_task_cancel",
+                "description": "Kill a running coding job.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string", "description": "The job_id to cancel."}},
+                    "required": ["job_id"],
                 },
             },
         })

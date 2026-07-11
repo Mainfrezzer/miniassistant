@@ -102,23 +102,45 @@ def _get_session_lock(session_id: str) -> threading.Lock:
 _rate_buckets: dict[str, list[float]] = {}   # ip -> liste von Request-Timestamps
 _rate_lock = threading.Lock()
 _rate_config_cache: tuple[float, int, int] = (0.0, 100, 100)  # (cached_at, server_limit, raw_proxy_limit)
-_trust_forwarded_cache: tuple[float, bool] = (0.0, False)  # (cached_at, value)
+_trust_conf_cache: tuple[float, bool, frozenset[str]] = (0.0, False, frozenset())  # (cached_at, trust_forwarded, trusted_proxies)
 _RATE_WINDOW = 60.0  # Sekunden
 
 
-def _get_trust_forwarded() -> bool:
-    """Cached server.trust_forwarded — vermeidet load_config()-YAML-Parse pro Request."""
-    global _trust_forwarded_cache
+def _get_trust_conf() -> tuple[bool, frozenset[str]]:
+    """Cached (server.trust_forwarded, server.trusted_proxies) — vermeidet load_config()-YAML-Parse pro Request."""
+    global _trust_conf_cache
     now = time.monotonic()
-    cached_at, val = _trust_forwarded_cache
+    cached_at, tf, proxies = _trust_conf_cache
     if now - cached_at < 30.0:
-        return val
+        return tf, proxies
     try:
-        val = bool((load_config().get("server") or {}).get("trust_forwarded"))
+        srv = load_config().get("server") or {}
+        tf = bool(srv.get("trust_forwarded"))
+        proxies = frozenset(str(p).strip() for p in (srv.get("trusted_proxies") or []) if str(p).strip())
     except Exception:
-        val = False
-    _trust_forwarded_cache = (now, val)
-    return val
+        tf, proxies = False, frozenset()
+    _trust_conf_cache = (now, tf, proxies)
+    return tf, proxies
+
+
+def _client_ip(request: Request) -> str:
+    """Client-IP für Rate-Limit/Ban-Buckets.
+    Forwarded-Header (X-Forwarded-For/X-Real-IP) werden nur akzeptiert wenn:
+      - trusted_proxies gesetzt ist UND die TCP-Peer-IP darin steht (Reverse-Proxy auf
+        anderem Host: Direktzugriffe können den Header dann nicht mehr spoofen), oder
+      - keine trusted_proxies konfiguriert sind und trust_forwarded=true (Alles-trusten,
+        nur sinnvoll wenn der Port nicht direkt erreichbar ist).
+    Sonst zählt die Peer-IP selbst."""
+    peer = (request.client.host if request.client else None) or "unknown"
+    trust_forwarded, trusted_proxies = _get_trust_conf()
+    trusted = (peer in trusted_proxies) if trusted_proxies else trust_forwarded
+    if not trusted:
+        return peer
+    return (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or request.headers.get("x-real-ip", "").strip()
+        or peer
+    )
 
 # Auth Brute-Force Protection: separate Buckets für fehlgeschlagene Auth-Versuche (401)
 _auth_fail_buckets: dict[str, list[float]] = {}
@@ -164,6 +186,23 @@ def _get_rate_limit(path: str = "/") -> int:
     return raw_limit if path.startswith("/raw/v1") else server_limit
 
 
+_last_bucket_prune = 0.0
+
+
+def _prune_stale_buckets(now: float) -> None:
+    """Entfernt Bucket-KEYS ohne gültige Timestamps (alle 5 min). Ohne das wachsen
+    _rate_buckets/_auth_fail_buckets mit jeder je gesehenen Client-IP unbegrenzt —
+    relevant seit trusted_proxies echte Client-IPs liefert. Caller hält _rate_lock."""
+    global _last_bucket_prune
+    if now - _last_bucket_prune < 300.0:
+        return
+    _last_bucket_prune = now
+    for ip in [k for k, ts in _rate_buckets.items() if not any(now - t < _RATE_WINDOW for t in ts)]:
+        del _rate_buckets[ip]
+    for ip in [k for k, ts in _auth_fail_buckets.items() if not any(now - t < _AUTH_FAIL_WINDOW for t in ts)]:
+        del _auth_fail_buckets[ip]
+
+
 def _check_rate_limit(ip: str, path: str = "/") -> bool:
     """True = Anfrage erlaubt, False = Rate-Limit überschritten."""
     limit = _get_rate_limit(path)
@@ -171,6 +210,7 @@ def _check_rate_limit(ip: str, path: str = "/") -> bool:
         return True  # 0 = deaktiviert
     now = time.time()
     with _rate_lock:
+        _prune_stale_buckets(now)
         timestamps = _rate_buckets.get(ip, [])
         # Einträge außerhalb des Fensters entfernen
         timestamps = [t for t in timestamps if now - t < _RATE_WINDOW]
@@ -181,7 +221,9 @@ def _check_rate_limit(ip: str, path: str = "/") -> bool:
         _rate_buckets[ip] = timestamps
     return True
 
-app = FastAPI(title="MiniAssistant", version="0.1.0")
+# No auto-docs: /docs, /redoc and /openapi.json would expose the full API surface
+# without auth — this service sits behind a public reverse proxy.
+app = FastAPI(title="MiniAssistant", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # OpenAI-kompatible API (/v1/models, /v1/chat/completions)
@@ -217,6 +259,12 @@ async def _startup() -> None:
         from miniassistant import webhooks as _wh_mod
         if _wh_mod.is_enabled():
             _wh_mod.sweep_all_outputs()
+    except Exception:
+        pass
+    # Docs-Index: incremental sync in background (config-gated, cheap when unchanged)
+    try:
+        from miniassistant.docs_index import sync_docs_index_background
+        sync_docs_index_background(getattr(app.state, "project_dir", None))
     except Exception:
         pass
     try:
@@ -375,17 +423,7 @@ async def _rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     if path.startswith("/static/") or path == "/favicon.ico":
         return await call_next(request)
-    # x-forwarded-for / x-real-ip nur trusten wenn server.trust_forwarded=true (Reverse-Proxy-Setup).
-    # Sonst kann jeder Client den Header spoofen und Rate-Limit/Brute-Force-Schutz umgehen.
-    if _get_trust_forwarded():
-        ip = (
-            request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-            or request.headers.get("x-real-ip", "").strip()
-            or (request.client.host if request.client else None)
-            or "unknown"
-        )
-    else:
-        ip = (request.client.host if request.client else None) or "unknown"
+    ip = _client_ip(request)
     if not _check_rate_limit(ip, path):
         return JSONResponse(
             status_code=429,
@@ -914,6 +952,12 @@ async def config_form_page(request: Request):
         {{ n:"host", t:"text", l:"Host", desc:"Bind-Adresse (z.B. 127.0.0.1 oder 0.0.0.0)" }},
         {{ n:"port", t:"int", l:"Port" }},
         {{ n:"token", t:"password", l:"API-Token", secretFlag:"_token_set", revealPath:"server.token", desc:"Leer = unverändert. Auge: aktuellen Wert anzeigen." }},
+        {{ n:"trust_forwarded", t:"bool", l:"X-Forwarded-For trusten", desc:"NUR hinter vertrauenswürdigem Reverse-Proxy auf gleicher Maschine. Wird ignoriert, wenn Trusted Proxies gesetzt sind." }},
+        {{ n:"trusted_proxies", t:"list_inline", l:"Trusted Proxies (Peer-IPs)", desc:"Proxy auf anderem Host: nur diese Peer-IPs dürfen X-Forwarded-For/X-Real-IP setzen (z.B. 10.0.0.1)." }},
+        {{ n:"rate_limit", t:"int", l:"Rate-Limit/min pro IP", desc:"Default 100, 0 = aus. Gilt für / und /v1." }},
+        {{ n:"mask_secrets_in_output", t:"bool", l:"Secrets im Output maskieren" }},
+        {{ n:"log_rotate_mb", t:"int", l:"Log-Rotation ab (MB)", desc:"agent_actions.log wird ab dieser Größe rotiert (.1/.2/…). Default 20, 0 = aus." }},
+        {{ n:"log_rotate_keep", t:"int", l:"Rotierte Logs behalten", desc:"Anzahl alter Generationen (Default 3), ältere werden gelöscht." }},
         {{ n:"debug", t:"bool", l:"Debug (Request/Response im JSON)" }},
         {{ n:"show_estimated_tokens", t:"bool", l:"Token-Schätzung im Stream zeigen" }},
         {{ n:"log_agent_actions", t:"bool", l:"Agent-Actions loggen" }},
@@ -1038,6 +1082,16 @@ async def config_form_page(request: Request):
         {{ n:"enabled", t:"bool", l:"Aktiv — ersetzt den System-Prompt für Web-UI + DMs (NICHT Gruppenräume)" }},
         {{ n:"file", t:"text", l:"Datei (leer = aio_caveman.md · aio.md = volle Version · oder absoluter Pfad). Dateien liegen in agent_dir/advanced_prompts/" }},
     ]}},
+
+    {{ id: "opencode", title: "OpenCode Coding-Connector", path: "opencode", fields: [
+        {{ n:"enabled", t:"bool", l:"Aktiv — blendet die code_task*-Tools ein (Coding an OpenCode delegieren)" }},
+        {{ n:"default_repo", t:"text", l:"Default-Repo (absoluter Pfad; Task kann eigenes repo übergeben)" }},
+        {{ n:"max_concurrent", t:"int", l:"Max. gleichzeitige Jobs (Last/Kosten-Deckel)" }},
+        {{ n:"max_runtime", t:"int", l:"Max. Laufzeit pro Job (s), danach Kill" }},
+        {{ n:"max_retries", t:"int", l:"Max. Auto-Retries (nur bei timeout/crash)" }},
+        {{ n:"attach_url", t:"text", l:"Remote OpenCode-Server (leer = lokaler Subprocess; z. B. http://host:4096)" }},
+    ]}},
+    // Hinweis: opencode.presets (model/agent pro Preset) nur im Raw-YAML-Editor.
 
     {{ id: "scheduler", title: "Scheduler", path: "scheduler", type:"falsy_or_form",
        fields:[{{n:"enabled", t:"bool", l:"Aktiv"}}] }},
@@ -4083,6 +4137,9 @@ async def api_usage(request: Request):
     _require_token(request)
     from_str = request.query_params.get("from")
     to_str = request.query_params.get("to")
+    # scopes=owner,group,raw — leer/fehlend = alle
+    _scopes_raw = (request.query_params.get("scopes") or "").strip()
+    scopes = {s for s in (_scopes_raw.split(",") if _scopes_raw else []) if s in ("owner", "group", "raw")} or None
     if from_str and to_str:
         from datetime import datetime
         from miniassistant.usage import get_usage_for_range
@@ -4091,11 +4148,11 @@ async def api_usage(request: Request):
             to_dt = datetime.strptime(to_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
         except ValueError:
             raise HTTPException(status_code=400, detail="Datumsformat muss YYYY-MM-DD sein")
-        data = get_usage_for_range(from_dt, to_dt)
+        data = get_usage_for_range(from_dt, to_dt, scopes=scopes)
     else:
         from miniassistant.usage import get_usage_for_period
         period = request.query_params.get("period", "day")
-        data = get_usage_for_period(period)
+        data = get_usage_for_period(period, scopes=scopes)
     return JSONResponse(data)
 
 
@@ -4167,6 +4224,11 @@ async def nutzung_page(request: Request):
         <input type="date" id="range-to" title="Bis">
         <button class="range-btn" id="range-go">Anzeigen</button>
       </div>
+      <div class="scope-bar" style="display:flex;justify-content:flex-start;gap:1.1em;margin:0.3em 0 0.6em;">
+        <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="owner" checked> Kontext</label>
+        <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="group" checked> Gruppen</label>
+        <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="raw" checked> Raw</label>
+      </div>
       <div class="summary-cards">
         <div class="summary-card"><div class="label">Gesamtzeit</div><div class="value" id="sum-time">—</div></div>
         <div class="summary-card"><div class="label">Anfragen</div><div class="value" id="sum-requests">—</div></div>
@@ -4232,10 +4294,38 @@ async def nutzung_page(request: Request):
         return h;
       }}
 
+      // Scope-Filter (Kontext/Gruppen/Raw) — Auswahl im Cookie, damit sie beim
+      // nächsten Besuch erhalten bleibt (kein Server-State).
+      function getCookie(n) {{ var m = document.cookie.match(new RegExp("(?:^|;\\\\s*)" + n + "=([^;]*)")); return m ? decodeURIComponent(m[1]) : null; }}
+      function setCookie(n, v) {{ document.cookie = n + "=" + encodeURIComponent(v) + ";path=/;max-age=31536000;samesite=strict"; }}
+      function selectedScopes() {{
+        return Array.prototype.slice.call(document.querySelectorAll(".scope-cb"))
+          .filter(function(cb) {{ return cb.checked; }})
+          .map(function(cb) {{ return cb.value; }});
+      }}
+      var _lastQuery = {{period: "day", from: null, to: null}};
+      (function initScopes() {{
+        var saved = getCookie("ma_usage_scopes");
+        if (saved !== null) {{
+          var set = saved.split(",");
+          document.querySelectorAll(".scope-cb").forEach(function(cb) {{ cb.checked = set.indexOf(cb.value) !== -1; }});
+        }}
+        document.querySelectorAll(".scope-cb").forEach(function(cb) {{
+          cb.addEventListener("change", function() {{
+            setCookie("ma_usage_scopes", selectedScopes().join(","));
+            loadData(_lastQuery.period, _lastQuery.from, _lastQuery.to);
+          }});
+        }});
+      }})();
+
       function loadData(period, fromDate, toDate) {{
+        _lastQuery = {{period: period, from: fromDate || null, to: toDate || null}};
         var url = fromDate && toDate
           ? "/api/usage?from=" + fromDate + "&to=" + toDate
           : "/api/usage?period=" + period;
+        var sc = selectedScopes();
+        // 1-2 gewählt = filtern; alle oder keine gewählt = ungefiltert (alles abwählen wäre sonst leere Seite)
+        if (sc.length > 0 && sc.length < 3) url += "&scopes=" + sc.join(",");
         fetch(url, {{credentials: "same-origin"}})
           .then(function(r) {{ return r.json(); }})
           .then(function(data) {{
@@ -5188,6 +5278,32 @@ def _agent_safe_target(config: dict, rel: str) -> "Path | None":
     return target
 
 
+def _docs_index_resync_if_indexed(rel: str) -> None:
+    """Nach Save/Delete unter docs/ oder directions/: Docs-Index im Hintergrund nachziehen."""
+    if not (rel.startswith("docs/") or rel.startswith("directions/") or rel.startswith("prefs/")):
+        return
+    try:
+        from miniassistant.docs_index import sync_docs_index_background
+        sync_docs_index_background(getattr(app.state, "project_dir", None))
+    except Exception:
+        pass
+
+
+@app.post("/api/docs-index/sync")
+async def api_docs_index_sync(request: Request):
+    """Docs-Index (docs/ + directions/) neu synchronisieren. force=1 → kompletter Rebuild."""
+    _require_token(request)
+    from miniassistant.docs_index import docs_index_enabled, sync_docs_index
+    project_dir = getattr(app.state, "project_dir", None)
+    if not docs_index_enabled(project_dir):
+        raise HTTPException(status_code=400, detail="docs index disabled (mempalace.enabled / mempalace.docs_index)")
+    force = request.query_params.get("force", "") in ("1", "true", "yes")
+    stats = await asyncio.to_thread(sync_docs_index, project_dir, force)
+    if "error" in stats:
+        raise HTTPException(status_code=500, detail=stats["error"])
+    return JSONResponse(stats)
+
+
 @app.get("/api/agent/files")
 async def api_agent_files(request: Request):
     """Listet die editierbaren Vorgaben-Dateien, gruppiert nach Kategorie."""
@@ -5251,6 +5367,7 @@ async def api_agent_file_save(request: Request):
     except Exception as e:
         _log.error("Vorgaben-Datei speichern fehlgeschlagen: %s", e)
         raise HTTPException(status_code=500, detail="save failed")
+    _docs_index_resync_if_indexed(rel)
     return JSONResponse({"ok": True, "path": rel, "bytes": target.stat().st_size})
 
 
@@ -5283,6 +5400,7 @@ async def api_agent_file_delete(request: Request):
     except Exception as e:
         _log.error("Vorgaben-Datei löschen fehlgeschlagen: %s", e)
         raise HTTPException(status_code=500, detail="delete failed")
+    _docs_index_resync_if_indexed(rel)
     return JSONResponse({"ok": True, "trashed": str(dest.name)})
 
 
@@ -5328,9 +5446,11 @@ __COMMON_CSS__
   <div style="display:flex; align-items:center; gap:0.6rem; margin-bottom:1rem;">
     <img src="/static/miniassistant.png" alt="Logo" style="height:2rem;width:auto">
     <h1 style="flex:1; margin:0; font-size:1.4em;">Vorgaben &amp; Dateien</h1>
+    <span id="ag-reidx-status" class="ag-status"></span>
+    <button class="btn btn-outline" id="ag-reindex" title="Docs &amp; Directions neu in den semantischen Index (search_docs) übernehmen">🔄 Docs-Index</button>
     <a href="/__TQ__" class="btn btn-outline">Startseite</a>
   </div>
-  <p class="text-muted" style="margin-top:-0.4rem">SOUL, IDENTITY, Regeln, Directions, Docs &amp; Prefs bearbeiten. Änderungen werden erst nach <b>Speichern</b> (mit Rückfrage) übernommen. Kein Löschen.</p>
+  <p class="text-muted" style="margin-top:-0.4rem">SOUL, IDENTITY, Regeln, Directions, Docs &amp; Prefs bearbeiten. Änderungen werden erst nach <b>Speichern</b> (mit Rückfrage) übernommen. Docs &amp; Directions werden beim Speichern automatisch neu indexiert (search_docs).</p>
   <div class="ag-layout">
     <div class="ag-list" id="ag-list"><div class="ag-empty">Lade…</div></div>
     <div class="ag-editor">
@@ -5467,6 +5587,17 @@ document.getElementById('ag-confirm-yes').addEventListener('click', async functi
   else { var e={}; try{ e=await r.json(); }catch(_){} setStatus('Fehler: '+(e.detail||r.status),'dirty'); }
 });
 window.addEventListener('beforeunload', function(e){ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+document.getElementById('ag-reindex').addEventListener('click', async function(){
+  var btn=this, st=document.getElementById('ag-reidx-status');
+  btn.disabled=true; st.textContent='indexiere…'; st.className='ag-status';
+  try {
+    var r = await fetch(hq('/api/docs-index/sync'), {method:'POST'});
+    var d = {}; try { d = await r.json(); } catch(_){}
+    if(r.ok){ st.textContent='✓ '+(d.indexed||0)+' neu, '+(d.unchanged||0)+' unverändert, '+(d.total_chunks||0)+' Chunks'; st.className='ag-status ok'; }
+    else { st.textContent='Fehler: '+(d.detail||r.status); st.className='ag-status dirty'; }
+  } catch(e){ st.textContent='Netzwerkfehler'; st.className='ag-status dirty'; }
+  btn.disabled=false;
+});
 loadList();
 </script>
 __THEME_JS__
@@ -6818,8 +6949,11 @@ def _collect_rooms_and_channels(config: dict) -> dict:
             "workspace_subdir": (s.get("workspace_subdir") or "").strip(),
             "auto_context_count": int(s.get("auto_context_count")) if s.get("auto_context_count") is not None else 3,
             "auto_context_max_chars": int(s.get("auto_context_max_chars")) if s.get("auto_context_max_chars") is not None else 200,
+            "auto_context_max_age_min": int(s.get("auto_context_max_age_min")) if s.get("auto_context_max_age_min") is not None else 360,
             "docs_in_sandbox": bool(s.get("docs_in_sandbox")),
             "search_chat_history_max": int(s.get("search_chat_history_max")) if s.get("search_chat_history_max") is not None else 200,
+            "user_daily_limit": int(s.get("user_daily_limit")) if s.get("user_daily_limit") is not None else 0,
+            "user_daily_limit_warn": int(s.get("user_daily_limit_warn")) if s.get("user_daily_limit_warn") is not None else 0,
             "model_switch": bool(s.get("model_switch")),
             "models_allow": [m for m in (s.get("models_allow") or []) if isinstance(m, str) and m.strip()],
             "model": (s.get("model") or "").strip() if isinstance(s.get("model"), str) else "",
@@ -7014,6 +7148,12 @@ async def api_rooms_settings_patch(request: Request):
                 out["auto_context_max_chars"] = max(20, min(int(entry.get("auto_context_max_chars") or 200), AUTO_CONTEXT_MAX_CHARS_CAP))
             except (TypeError, ValueError):
                 pass
+        if "auto_context_max_age_min" in entry:
+            try:
+                from miniassistant.group_rooms import AUTO_CONTEXT_MAX_AGE_MIN_CAP
+                out["auto_context_max_age_min"] = max(0, min(int(entry.get("auto_context_max_age_min") or 0), AUTO_CONTEXT_MAX_AGE_MIN_CAP))
+            except (TypeError, ValueError):
+                pass
         # Docs read-only mount toggle
         if "docs_in_sandbox" in entry:
             out["docs_in_sandbox"] = bool(entry.get("docs_in_sandbox"))
@@ -7021,6 +7161,17 @@ async def api_rooms_settings_patch(request: Request):
         if "search_chat_history_max" in entry:
             try:
                 out["search_chat_history_max"] = max(10, min(int(entry.get("search_chat_history_max") or 200), 500))
+            except (TypeError, ValueError):
+                pass
+        # Per-User-Tageslimit (0 = unbegrenzt) + Warnschwelle (0 = keine Warnung)
+        if "user_daily_limit" in entry:
+            try:
+                out["user_daily_limit"] = max(0, min(int(entry.get("user_daily_limit") or 0), 100000))
+            except (TypeError, ValueError):
+                pass
+        if "user_daily_limit_warn" in entry:
+            try:
+                out["user_daily_limit_warn"] = max(0, min(int(entry.get("user_daily_limit_warn") or 0), 100))
             except (TypeError, ValueError):
                 pass
         # Modell-Switching im Group-Raum: Schalter + Allowlist + aktives Raum-Modell.
@@ -7116,7 +7267,10 @@ async def rooms_page(request: Request):
         sub = s.get("workspace_subdir", "")
         ac_count = int(s.get("auto_context_count", 3))
         ac_max = int(s.get("auto_context_max_chars", 200))
+        ac_age = int(s.get("auto_context_max_age_min", 360))
         sch_max = int(s.get("search_chat_history_max", 200))
+        udl = int(s.get("user_daily_limit", 0))
+        udl_warn = int(s.get("user_daily_limit_warn", 0))
         docs_mount = bool(s.get("docs_in_sandbox"))
         model_switch = bool(s.get("model_switch"))
         models_allow = [m for m in (s.get("models_allow") or []) if isinstance(m, str) and m.strip()]
@@ -7178,8 +7332,14 @@ async def rooms_page(request: Request):
             f'<div style="display:flex;align-items:center;gap:0.6em;"><span style="font-size:0.82em;color:var(--muted);flex:1;">vorherige Raum-Nachrichten automatisch prependen (0 = aus, default 3)</span><input type="number" class="grp-ac-count" value="{ac_count}" min="0" max="20" step="1" style="padding:0.25em 0.4em;font-size:0.9em;width:6em;" title="0 = aus, max 20"></div>'
             f'<label>Auto-Context: Zeichen/Nachricht</label>'
             f'<div style="display:flex;align-items:center;gap:0.6em;"><span style="font-size:0.82em;color:var(--muted);flex:1;">truncate jede Nachricht (default 200, max 5000)</span><input type="number" class="grp-ac-max" value="{ac_max}" min="20" max="5000" step="10" style="padding:0.25em 0.4em;font-size:0.9em;width:6em;" title="20–5000"></div>'
+            f'<label>Auto-Context: Max Alter (Min)</label>'
+            f'<div style="display:flex;align-items:center;gap:0.6em;"><span style="font-size:0.82em;color:var(--muted);flex:1;">ältere Nachrichten fliegen ganz raus (0 = kein Limit, default 360 = 6h)</span><input type="number" class="grp-ac-age" value="{ac_age}" min="0" max="10080" step="30" style="padding:0.25em 0.4em;font-size:0.9em;width:6em;" title="0 = aus, max 10080 (7 Tage)"></div>'
             f'<label>Chat-Suche: Max Scan</label>'
             f'<div style="display:flex;align-items:center;gap:0.6em;"><span style="font-size:0.82em;color:var(--muted);flex:1;">obergrenze für <code>search_chat_history</code> (default 200)</span><input type="number" class="grp-sch-max" value="{sch_max}" min="10" max="500" step="10" style="padding:0.25em 0.4em;font-size:0.9em;width:6em;" title="10–500"></div>'
+            f'<label>Tageslimit pro User</label>'
+            f'<div style="display:flex;align-items:center;gap:0.6em;"><span style="font-size:0.82em;color:var(--muted);flex:1;">Nachrichten pro User pro Tag (0 = unbegrenzt); drüber wird verworfen, ein Hinweis pro User/Tag</span><input type="number" class="grp-udl" value="{udl}" min="0" max="100000" step="1" style="padding:0.25em 0.4em;font-size:0.9em;width:6em;" title="0 = unbegrenzt"></div>'
+            f'<label>Limit-Warnung ab Rest</label>'
+            f'<div style="display:flex;align-items:center;gap:0.6em;"><span style="font-size:0.82em;color:var(--muted);flex:1;">wenn ≤ N Nachrichten übrig: Bot sagt dem User wie viele noch (0 = keine Warnung; Sprache wählt das Modell)</span><input type="number" class="grp-udl-warn" value="{udl_warn}" min="0" max="100" step="1" style="padding:0.25em 0.4em;font-size:0.9em;width:6em;" title="0 = aus"></div>'
             f'<label>Docs in Sandbox</label>'
             f'<label style="display:inline-flex;align-items:center;gap:0.4em;font-weight:normal;"><input type="checkbox" class="grp-docs"{" checked" if docs_mount else ""}> <span style="font-size:0.82em;color:var(--muted);">mountet <code>/docs/</code> read-only (Bot kann via <code>exec cat /docs/FILE</code> Doku lesen)</span></label>'
             f'<label>Modell-Wechsel</label>'
@@ -7507,7 +7667,10 @@ async def rooms_page(request: Request):
       row.querySelectorAll(".grp-tool:checked").forEach(function(cb){{ tools.push(cb.getAttribute("data-tool")); }});
       var ac_count = parseInt((row.querySelector(".grp-ac-count") || {{value: "3"}}).value, 10);
       var ac_max = parseInt((row.querySelector(".grp-ac-max") || {{value: "200"}}).value, 10);
+      var ac_age = parseInt((row.querySelector(".grp-ac-age") || {{value: "360"}}).value, 10);
       var sch_max = parseInt((row.querySelector(".grp-sch-max") || {{value: "200"}}).value, 10);
+      var udl = parseInt((row.querySelector(".grp-udl") || {{value: "0"}}).value, 10);
+      var udl_warn = parseInt((row.querySelector(".grp-udl-warn") || {{value: "0"}}).value, 10);
       var docs_mount = !!(row.querySelector(".grp-docs") || {{checked: false}}).checked;
       var model_switch = !!(row.querySelector(".grp-model-switch") || {{checked: false}}).checked;
       var models_allow = [];
@@ -7516,7 +7679,10 @@ async def rooms_page(request: Request):
       var out = {{context: ctx, language: lang, tools_allow: tools,
                   auto_context_count: isNaN(ac_count) ? 3 : ac_count,
                   auto_context_max_chars: isNaN(ac_max) ? 200 : ac_max,
+                  auto_context_max_age_min: isNaN(ac_age) ? 360 : ac_age,
                   search_chat_history_max: isNaN(sch_max) ? 200 : sch_max,
+                  user_daily_limit: isNaN(udl) ? 0 : udl,
+                  user_daily_limit_warn: isNaN(udl_warn) ? 0 : udl_warn,
                   docs_in_sandbox: docs_mount,
                   model_switch: model_switch,
                   models_allow: models_allow}};
@@ -7545,7 +7711,7 @@ async def rooms_page(request: Request):
       _updateDirtyUi();
     }}
     document.querySelectorAll("tr.grp-settings-row").forEach(function(row) {{
-      row.querySelectorAll(".grp-ctx, .grp-lang, .grp-sub, .grp-tool, .grp-ac-count, .grp-ac-max, .grp-sch-max, .grp-docs, .grp-model-switch, .grp-model-cb, .grp-model").forEach(function(el){{
+      row.querySelectorAll(".grp-ctx, .grp-lang, .grp-sub, .grp-tool, .grp-ac-count, .grp-ac-max, .grp-ac-age, .grp-sch-max, .grp-docs, .grp-model-switch, .grp-model-cb, .grp-model").forEach(function(el){{
         var evt = (el.tagName === "INPUT" && (el.type === "text" || el.type === "number")) ? "input" : "change";
         el.addEventListener(evt, function(){{ _queueSettingsFromRow(row); }});
       }});

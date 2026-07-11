@@ -203,10 +203,19 @@ def aggregate(entries: list[dict], group_by: str = "day") -> dict:
     }
 
 
-def get_usage_for_period(period: str = "day") -> dict:
+def _filter_scopes(entries: list[dict], scopes: set[str] | None) -> list[dict]:
+    """Filtert Einträge auf die gewünschten Scopes (owner/group/raw). None = alle.
+    Einträge ohne scope-Feld (alte CSV-Zeilen) zählen als 'owner'."""
+    if not scopes:
+        return entries
+    return [e for e in entries if (e.get("scope") or "owner") in scopes]
+
+
+def get_usage_for_period(period: str = "day", scopes: set[str] | None = None) -> dict:
     """Lädt und aggregiert Usage für einen Zeitraum.
 
     period: "hour" | "day" | "3days" | "week" | "month" | "year" | "all"
+    scopes: optionale Scope-Auswahl (owner/group/raw), None = alle
     """
     now = datetime.now()
     if period == "hour":
@@ -231,11 +240,11 @@ def get_usage_for_period(period: str = "day") -> dict:
         after = None
         group = "month"
 
-    entries = load(after=after)
+    entries = _filter_scopes(load(after=after), scopes)
     return aggregate(entries, group_by=group)
 
 
-def get_usage_for_range(from_dt: datetime, to_dt: datetime) -> dict:
+def get_usage_for_range(from_dt: datetime, to_dt: datetime, scopes: set[str] | None = None) -> dict:
     """Lädt und aggregiert Usage für einen benutzerdefinierten Zeitraum."""
     delta = to_dt - from_dt
     if delta.days <= 1:
@@ -244,5 +253,5 @@ def get_usage_for_range(from_dt: datetime, to_dt: datetime) -> dict:
         group = "day"
     else:
         group = "month"
-    entries = load(after=from_dt, before=to_dt)
+    entries = _filter_scopes(load(after=from_dt, before=to_dt), scopes)
     return aggregate(entries, group_by=group)

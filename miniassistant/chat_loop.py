@@ -46,7 +46,7 @@ from queue import Queue, Empty as _QueueEmpty
 from threading import Thread as _Thread
 
 # Tools die sicher parallel ausgeführt werden können (kein shared state, kein Filesystem-Konflikt)
-_CONCURRENT_SAFE_TOOLS = frozenset({"invoke_model", "read_url", "check_url", "read_email", "search_memory", "download_file"})
+_CONCURRENT_SAFE_TOOLS = frozenset({"invoke_model", "read_url", "check_url", "read_email", "search_memory", "search_docs", "download_file"})
 
 # ---------------------------------------------------------------------------
 #  Prompt-Injection Sanitization für Tool-Ergebnisse
@@ -515,81 +515,8 @@ def _strip_dead_links(text: str, max_links: int = 10, timeout: float = 12.0) -> 
 # Gate fälschlich wenn das Modell Fakten via exec/curl statt web_search holt.
 _RESEARCH_SATISFYING_TOOLS = frozenset({
     "exec", "web_search", "web_search_multi", "read_url", "check_url",
-    "read_email", "invoke_model", "download_file", "search_memory",
+    "read_email", "invoke_model", "download_file", "search_memory", "search_docs",
 })
-# Claim-Fragen (Preise/Specs/Versionen/News/Verfügbarkeit/Kaufberatung) MÜSSEN
-# recherchiert werden — knowledge_verification.md sagt das, aber kleine Modelle
-# überspringen die Regel unter Last. Hier wird sie programmatisch erzwungen:
-# erkennt der Detektor eine Claim-Frage und das Modell will ohne web_search
-# antworten → Antwort verwerfen, Such-Nudge, retry.
-_CLAIM_KEYWORDS_DEFAULT = (
-    # Preise / Kauf
-    "preis", "kostet", "kosten", "günstig", "guenstig", "teuer", "kaufen", "angebot",
-    "rabatt", "gutschein", "deal", "€", " eur", "dollar",
-    # Empfehlung / Produktvergleich
-    "empfehl", "welche grafikkarte", "welches modell", "welcher cpu", "beste ", "bester ",
-    "günstigste", "guenstigste", "vergleich", "lohnt sich", "soll ich kaufen", "kaufberatung",
-    # Versionen / Aktualität
-    "aktuelle ", "aktueller ", "aktuellste", "neueste", "neuste", "neuesten",
-    "erscheint", "erschienen", "welche version", "version von", "specs", "spezifikation",
-    "technische daten", "benchmark",
-    # Verfügbarkeit / News
-    "verfügbar", "verfuegbar", "lieferbar", "auf dem markt", "wo kann ich", "wo gibt es",
-    "was kostet", "wie viel kostet", "wieviel kostet", "wie teuer",
-)
-# Klar nicht-faktische Anfragen → Gate NICHT auslösen (Kreatives, Sprache, Code,
-# Textbearbeitung). Edit-/Schreib-Aufgaben enthalten oft zufällig Kosten-/Spec-Wörter
-# (z.B. eine E-Mail über Preise umformulieren) — die sollen KEINE Recherche auslösen.
-_NONCLAIM_KEYWORDS = (
-    # Kreativ / Sprache / Code
-    "schreib", "gedicht", "witz", "erzähl", "erzaehl", "übersetze", "uebersetze",
-    "fasse zusammen", "zusammenfassung", "programmier", "code", "debug", "erkläre mir wie",
-    "erklär mir wie", "wie funktioniert", "rezept", "korrigier", "formulier",
-    # Textbearbeitung / Umschreiben (nur EINDEUTIGE Edit-Verben — Ton-Adjektive wie
-    # "professioneller"/"höflicher"/"verbesser"/"kürzer" bewusst NICHT, die kollidieren mit
-    # echten Produktfragen "welcher monitor ist professioneller, was kostet er").
-    "umformulier", "umschreib", "überarbeite", "ueberarbeite", "lektorier", "redigier",
-    "rechtschreib", "grammatik", "korrektur", "glätte", "glaette",
-    "ausformulier", "feinschliff", "verfasse", "verfass", "entwirf",
-    "mach das besser", "mach es besser", "mach das schöner", "mach es schöner",
-    # Bezug auf mitgelieferten Text
-    "diesen text", "dieser text", "den text", "folgenden text", "obigen text", "diesen absatz",
-    "den absatz", "diese mail", "diese e-mail", "diese email", "diese nachricht", "die nachricht",
-)
-# Struktur-Marker für MITGELIEFERTEN Text (E-Mail/Brief, den der User bearbeiten lässt).
-# Werden VOR den Claim-Keywords geprüft → ein Kosten-/Preis-Wort IM zitierten Text triggert
-# kein STOP, auch wenn die Anweisung selbst kein Edit-Verb enthält ("mach das besser").
-_TEXT_WORK_MARKERS = (
-    "betreff:", "sehr geehrte", "sehr geehrter", "mit freundlichen grüßen",
-    "mit freundlichen gruessen", "liebe grüße", "liebe gruesse", "beste grüße", "beste gruesse",
-    "viele grüße", "viele gruesse", "hallo zusammen", "anbei", "im anhang", "hiermit ",
-)
-
-
-def _is_claim_question(text: str, keywords: tuple[str, ...] = _CLAIM_KEYWORDS_DEFAULT) -> bool:
-    """Heuristik: braucht die Frage frische, verifizierbare Fakten (→ Recherche-Pflicht)?
-    Konservativ-aber-nützlich: Claim-Keyword vorhanden UND kein klares Nicht-Claim-Signal.
-    False-Positive kostet nur eine unnötige Suche (~1s); False-Negative = Halluzination."""
-    if not text:
-        return False
-    t = text.lower()
-    if len(t) < 8:
-        return False
-    if any(nk in t for nk in _NONCLAIM_KEYWORDS):
-        return False
-    # Mitgelieferter E-Mail-/Brieftext → Bearbeitung, keine Faktenfrage (auch wenn Kosten-/
-    # Preis-Wörter im zitierten Text stehen). Vor den Claim-Keywords prüfen.
-    if any(m in t for m in _TEXT_WORK_MARKERS):
-        return False
-    if any(k in t for k in keywords):
-        return True
-    # Spec-Pattern: Zahl direkt vor Tech-Einheit (z.B. "32gb", "144hz", "750watt") →
-    # starkes Hardware-/Spec-Signal, auch ohne explizites Claim-Keyword.
-    if _re.search(r'\b\d+\s?(gb|tb|ghz|mhz|hz|watt|w|mp|fps|nm|zoll|inch|mah)\b', t):
-        return True
-    return False
-
-
 # Output-based research-gate detector (language-agnostic). Instead of guessing from the
 # QUESTION (keyword list, German-only), check the ANSWER: does it assert a hard fact
 # (price / version) that is NOT in this round's tool output? Prices/versions are
@@ -603,22 +530,24 @@ _FACT_PRICE_RE = _re.compile(
 _FACT_VERSION_RE = _re.compile(r'\bv?\d+\.\d+(?:\.\d+)+\b')  # v1.2.3 (3+ segments → not a price/date)
 
 
-def _answer_has_unsourced_facts(answer: str, sources: str) -> bool:
-    """True if the answer asserts a price/version whose digits do NOT appear in this
-    round's sources (tool results + user message). Conservative: min. 3 digits (shorter
-    ones match by chance too often). False positive only costs an extra search;
-    false negative = an unsourced number stays in."""
+def _unsourced_fact_tokens(answer: str, sources: str) -> list[str]:
+    """Price/version-shaped tokens in the answer whose digits do NOT appear in this
+    round's sources (tool results + user message). This is only a FLAG list — the
+    model self-verifies each hit (a reformatted value like ISO date → TT.MM.JJJJ
+    reorders digits and is a legitimate miss here). Conservative: min. 3 digits
+    (shorter ones match by chance too often)."""
     if not answer or not answer.strip():
-        return False
+        return []
     src_digits = _re.sub(r'\D', '', sources or "")
+    tokens: list[str] = []
     for rx in (_FACT_PRICE_RE, _FACT_VERSION_RE):
         for tok in rx.findall(answer):
             digits = _re.sub(r'\D', '', tok)
             if len(digits) < 3:
                 continue
-            if digits not in src_digits:
-                return True
-    return False
+            if digits not in src_digits and tok not in tokens:
+                tokens.append(tok)
+    return tokens
 
 
 def _round_tool_sources(msgs: list[dict[str, Any]], user_content: str) -> str:
@@ -631,28 +560,41 @@ def _round_tool_sources(msgs: list[dict[str, Any]], user_content: str) -> str:
     return "\n".join(parts)
 
 
-def _research_gate_nudge(user_content: str) -> str:
-    """Search nudge, anchored to the CURRENT question (otherwise the model latches onto
-    the wrong/old topic in a long conversation).
+def _research_gate_nudge(user_content: str, tokens: list[str] | None = None) -> str:
+    """Self-verification nudge, anchored to the CURRENT question (otherwise the model
+    latches onto the wrong/old topic in a long conversation).
+
+    The gate regex is only a heuristic flagger — it cannot tell a memory-fact from a
+    legitimately reformatted tool value (e.g. ISO date → TT.MM.JJJJ reorders the digits).
+    So the MODEL decides per flagged value: sourced → re-emit the full answer; from
+    memory → research first. Either way the reply must be the COMPLETE final answer,
+    because the previous one was discarded and only this reply reaches the user.
 
     Framed as an AUTOMATED SYSTEM check, not a user message — so the model does NOT
-    apologize to the user ("du hast recht...") or mention the check. It just silently
-    re-searches and produces the corrected answer. This matters especially for scheduled/
-    autonomous tasks where there is no user to address."""
+    apologize to the user ("du hast recht...") or mention the check. This matters
+    especially for scheduled/autonomous tasks where there is no user to address."""
     q = (user_content or "").strip().replace("\n", " ")
     if len(q) > 200:
         q = q[:200] + "…"
+    tok_list = ", ".join(f"«{t}»" for t in (tokens or [])[:10]) or "(none isolated)"
     return (
         "[AUTOMATED SYSTEM VERIFICATION — this is NOT the user; the user did not say this. "
         "It is an internal fact-check by the MiniAssistant runtime.]\n"
-        "Your previous answer contains a price/version/number that is NOT in this round's tool "
-        "output — i.e. from memory. That is not allowed.\n"
+        "A heuristic flagged number-like values in your previous answer that were not found "
+        f"verbatim in this round's tool output: {tok_list}\n"
+        "This can be a false alarm (e.g. a date or number you correctly reformatted from tool "
+        "output). Verify EACH flagged value yourself against the tool output of this round:\n"
+        "- Value comes from tool output (verbatim or reformatted, e.g. date conversion, rounding, "
+        "unit change)? → keep it.\n"
+        "- Value comes from your memory and is not backed by any tool output? → call `web_search` "
+        "(then `read_url` for the relevant hits) and correct it. If you can't verify it: say so, "
+        "invent nothing.\n"
         f"This concerns ONLY this question: «{q}»\n"
-        "Call `web_search` NOW (at least once, then `read_url` for the relevant hits) and then "
-        "produce the answer — using only numbers/prices/versions that appear verbatim in the tool "
-        "output, plus the source links. Stay on the topic above. If you can't find it: say so, invent nothing.\n"
-        "Do NOT apologize, do NOT write \"you are right\" or \"that's not correct\", and do NOT mention "
-        "this verification step. Just give the corrected answer directly as your normal reply."
+        "IMPORTANT: Your previous answer was DISCARDED and never delivered. Whatever you write now "
+        "is the ONLY reply the user receives. Therefore output the COMPLETE final answer again in "
+        "the required format — never just a confirmation, explanation, or verification summary.\n"
+        "Do NOT apologize, do NOT write \"you are right\" or \"that's not correct\", and do NOT "
+        "mention this verification step. Just give the final answer directly as your normal reply."
     )
 
 
@@ -683,6 +625,10 @@ def _is_image_caption_only(text: str) -> bool:
 _LAZY_CORE_TOOLS = {
     "exec", "web_search", "web_search_multi", "read_url", "check_url",
     "invoke_model", "send_image", "download_file", "status_update", "wait",
+    # search_memory/search_docs: always visible — the model can't decide to recall
+    # what it can't see, and keyword-gating recall questions proved too brittle
+    # ("erinnern" missed the "erinnerst du" trigger → model concluded memory was empty).
+    "search_memory", "search_docs",
 }
 _LAZY_TOOL_GROUPS: dict[str, tuple[set[str], tuple[str, ...]]] = {
     "email":    ({"send_email", "read_email"},
@@ -705,10 +651,6 @@ _LAZY_TOOL_GROUPS: dict[str, tuple[set[str], tuple[str, ...]]] = {
                  ("config", "konfig", "einstellung", "setting", "modell wechsel",
                   "wechsel das modell", "alias", "provider", "num_ctx", "temperature",
                   "stell ein")),
-    "memory":   ({"search_memory"},
-                 ("erinnerst du", "weißt du noch", "weisst du noch", "letztes mal",
-                  "früher gesagt", "frueher gesagt", "vorhin gesagt", "gedächtnis",
-                  "gedaechtnis", "memory")),
     "history":  ({"search_chat_history", "read_recent_messages", "get_user_profile",
                   "get_room_last_fire"},
                  ("verlauf", "history", "letzte nachricht", "wer hat", "profil",
@@ -716,7 +658,36 @@ _LAZY_TOOL_GROUPS: dict[str, tuple[set[str], tuple[str, ...]]] = {
     "audio":    ({"send_audio"},
                  ("sprich", "audio", "sprachnachricht", "voice", "sag es laut",
                   "vorlesen", "lies vor", "tts")),
+    "coding":   ({"code_task", "code_task_status", "code_task_followup",
+                  "code_task_list", "code_task_cancel"},
+                 ("code", "coden", "programmier", "opencode", "refactor", "implementier",
+                  "feature", "bug", "fix ", "unit test", "unittest", "review", "repo",
+                  "funktion", "klasse", "script", "pull request", " pr ", "commit")),
 }
+
+
+def _lazy_tools_hint(config: dict[str, Any], tools_schema: list[dict[str, Any]],
+                     base_allow: set[str] | None) -> str:
+    """One-line system-prompt note naming tools whose schemas were lazily omitted.
+    The model can't decide to use what it doesn't know exists (the "memory is empty"
+    incident) — but dispatch executes calls fine without the schema being sent, so
+    naming the omitted tools restores the model's own judgment at ~1 line of cost.
+    Diffed against the real get_tools_schema output, so config-disabled tools
+    (email off, mempalace off, group whitelist) are never falsely advertised."""
+    if not config.get("lazy_tools"):
+        return ""
+    full = {t["function"]["name"] for t in get_tools_schema(config, allow=base_allow)}
+    loaded = {t["function"]["name"] for t in tools_schema}
+    omitted = sorted(full - loaded)
+    if not omitted:
+        return ""
+    return (
+        "\n\n[Additional tools] These tools also exist: " + ", ".join(omitted) + ". "
+        "Their schemas were omitted this round to save tokens, but they are fully callable: "
+        "emit a normal tool call with the exact name, exactly as for your listed tools — it WILL be "
+        "executed. Do NOT try to reach them via exec/python imports or subagents; call them directly. "
+        "Incomplete calls return hints about required arguments."
+    )
 
 
 def _lazy_tool_allow(config: dict[str, Any], user_content: str,
@@ -725,7 +696,9 @@ def _lazy_tool_allow(config: dict[str, Any], user_content: str,
     lazy_tools aus → base_allow unverändert. Group-Mode-Whitelist wird respektiert (Schnitt)."""
     if not config.get("lazy_tools"):
         return base_allow
-    t = (user_content or "").lower()
+    # _lazy_scan_extra: pre-read direction file content (scheduler) — the task text alone
+    # doesn't reveal tools the direction asks for (it's only read via exec at runtime).
+    t = ((user_content or "") + "\n" + (config.get("_lazy_scan_extra") or "")).lower()
     allow = set(_LAZY_CORE_TOOLS)
     for names, kws in _LAZY_TOOL_GROUPS.values():
         if any(k in t for k in kws):
@@ -2419,6 +2392,11 @@ def _auto_deliver_group_image(config: dict[str, Any], host_path: str, caption: s
             config["_send_image_count_this_turn"] = max(0, int(config.get("_send_image_count_this_turn") or 1) - 1)
             (config.get("_auto_sent_image_paths") or set()).discard(host_path)
         return None
+    try:
+        from miniassistant.room_images import record_image as _ri_rec
+        _ri_rec(config, host_path, who="bot", kind="generated")
+    except Exception:
+        pass
     return "sent"
 
 
@@ -2678,6 +2656,77 @@ def _run_tool(
             _sm_lines.append(r["content"])
             _sm_lines.append("")
         return "\n".join(_sm_lines)
+    if name == "search_docs":
+        from miniassistant.docs_index import search_docs_index
+        _sd_query = (arguments.get("query") or "").strip()
+        if not _sd_query:
+            return "search_docs requires 'query'"
+        _sd_cat = (arguments.get("category") or "").strip() or None
+        _sd_n = min(10, max(1, int(arguments.get("n_results", 5) or 5)))
+        _sd_results = search_docs_index(_sd_query, project_dir, n_results=_sd_n, category=_sd_cat)
+        if not _sd_results:
+            return f"No doc chunks found for: \"{_sd_query}\""
+        _sd_lines = [f"Found {len(_sd_results)} doc chunks for \"{_sd_query}\":\n"]
+        for i, r in enumerate(_sd_results, 1):
+            _sd_lines.append(f"[{i}] {r['source']}" + (f" § {r['heading']}" if r["heading"] else "") + f" (similarity: {r['similarity']})")
+            _sd_lines.append(r["content"])
+            _sd_lines.append("")
+        _sd_lines.append("Full files: read with `cat` from the paths above (relative to the agent dir).")
+        return "\n".join(_sd_lines)
+    if name in ("code_task", "code_task_status", "code_task_followup", "code_task_list", "code_task_cancel"):
+        from miniassistant import opencode_client as _oc
+
+        def _fmt_job(j: dict[str, Any]) -> str:
+            if j.get("status") == "rejected":
+                return f"code_task rejected: {j.get('error')}"
+            if j.get("status") == "not_found":
+                return f"job {j.get('id')} not found"
+            lines = [f"job_id: {j.get('id')}  status: {j.get('status')}"]
+            if j.get("session_id"):
+                lines.append(f"session: {j['session_id']}")
+            if j.get("model"):
+                lines.append(f"model: {j['model']}" + (f"  preset: {j['preset']}" if j.get("preset") else ""))
+            if j.get("elapsed") is not None:
+                lines.append(f"elapsed: {j['elapsed']}s")
+            if j.get("diff_stat"):
+                lines.append(f"diff:\n{j['diff_stat']}")
+            if j.get("result"):
+                lines.append(f"result:\n{j['result'][:4000]}")
+            if j.get("log_tail") and not j.get("result"):
+                lines.append(f"log_tail:\n{j['log_tail']}")
+            return "\n".join(lines)
+
+        if name == "code_task":
+            _repo = (arguments.get("repo") or "").strip() or (config.get("opencode") or {}).get("default_repo")
+            if not _repo:
+                return "code_task error: no repo given and opencode.default_repo not set in config."
+            r = _oc.start_job(
+                config, arguments.get("prompt", ""), _repo,
+                model=(arguments.get("model") or None),
+                preset=(arguments.get("preset") or None),
+            )
+            if r.get("status") == "rejected":
+                return _fmt_job(r)
+            return _fmt_job(r) + "\n\n(Task running in background. Poll with code_task_status; do not wait.)"
+        if name == "code_task_status":
+            return _fmt_job(_oc.job_status(config, arguments.get("job_id", "")))
+        if name == "code_task_followup":
+            r = _oc.continue_job(config, arguments.get("job_id", ""), arguments.get("prompt", ""))
+            if r.get("status") in ("rejected", "not_found"):
+                return _fmt_job(r)
+            return _fmt_job(r) + "\n\n(Follow-up running in same session. Poll with code_task_status.)"
+        if name == "code_task_cancel":
+            r = _oc.job_cancel(config, arguments.get("job_id", ""))
+            return f"job {r.get('id')}: {r.get('status')}"
+        if name == "code_task_list":
+            jobs = _oc.job_list(config)
+            if not jobs:
+                return "No coding jobs."
+            return "\n".join(
+                f"{j.get('id')}  {j.get('status'):9}  {j.get('kind',''):8}  {j.get('model') or '-'}  {(j.get('prompt') or '')[:60]}"
+                for j in jobs
+            )
+
     if name == "exec":
         cmd = arguments.get("command", "")
         _exec_ctx = config.get("_chat_context") or {}
@@ -3268,6 +3317,11 @@ def _run_tool(
             )
             parts = [f"{k}: {v}" for k, v in results.items()]
             config["_send_image_count_this_turn"] = _sent_count + 1
+            try:
+                from miniassistant.room_images import record_image as _ri_rec
+                _ri_rec(config, image_path, who="bot", kind="generated")
+            except Exception:
+                pass
             return "\n".join(parts) if parts else f"Bild gespeichert: {image_path} (kein Chat-Client im Kontext)"
         except Exception as e:
             return f"send_image failed: {e}"
@@ -5929,6 +5983,7 @@ def chat_round(
     _gm_ctx = config.get("_chat_context") or {}
     _gm_allow = set(_gm_ctx.get("tools_allow") or []) if _gm_ctx.get("group_mode") else None
     tools_schema = get_tools_schema(config, allow=_lazy_tool_allow(config, user_content, _gm_allow))
+    system_prompt += _lazy_tools_hint(config, tools_schema, _gm_allow)
     # Reliability-Guards (gleich wie chat_round_stream — Matrix/Discord laufen über DIESEN Pfad)
     _seen_urls: set[str] = set()
     _url_guard_enabled = bool(config.get("url_hallucination_guard", True))
@@ -5939,7 +5994,6 @@ def chat_round(
     _read_url_count = 0
     _data_tool_count = 0          # alle daten-beschaffenden Tools (exec/curl, invoke_model, ...) — Research-Gate
     _has_search = bool(config.get("search_engines"))
-    _claim_kw = tuple(config.get("research_gate_keywords") or _CLAIM_KEYWORDS_DEFAULT)
     # Tool-Call-Dedup (Parität mit chat_round_stream): identische research-Calls 2× → block statt erneut ausführen.
     # Verhindert Cross-Round-Loops (z. B. gleicher web_search 50× hintereinander) im Matrix/Discord/Scheduler-Pfad.
     _seen_tool_keys: dict[str, str] = {}
@@ -6172,22 +6226,23 @@ def chat_round(
                     _display_content = _strip_tool_call_tags(_msg_content)
 
                 if not tool_calls:
-                    # Research gate (output-based, language-agnostic): the answer asserts a
-                    # price/version that is NOT in this round's tool output → discard the answer,
-                    # send a search nudge anchored to the current question, retry.
+                    # Research gate (output-based, language-agnostic): flag price/version tokens
+                    # not found in this round's tool output, then let the MODEL self-verify —
+                    # false positives (reformatted dates etc.) just re-emit the full answer.
                     if (_research_gate_enabled
                             and _research_gate_attempts < _research_gate_max
                             and _has_search
                             and (_msg_content or "").strip()
-                            and rounds < max_tool_rounds - 1
-                            and _answer_has_unsourced_facts(_msg_content, _round_tool_sources(msgs, user_content))):
-                        _research_gate_attempts += 1
-                        _log.info("Research gate (chat_round): unsourced price/version in answer — forcing web_search (attempt %d/%d, round %d)",
-                                  _research_gate_attempts, _research_gate_max, rounds)
-                        msgs.append({"role": "assistant", "content": _msg_content or "", "thinking": msg.get("thinking") or ""})
-                        msgs.append({"role": "user", "content": _research_gate_nudge(user_content)})
-                        rounds += 1
-                        continue
+                            and rounds < max_tool_rounds - 1):
+                        _gate_tokens = _unsourced_fact_tokens(_msg_content, _round_tool_sources(msgs, user_content))
+                        if _gate_tokens:
+                            _research_gate_attempts += 1
+                            _log.info("Research gate (chat_round): unsourced tokens %s — self-verify nudge (attempt %d/%d, round %d)",
+                                      _gate_tokens, _research_gate_attempts, _research_gate_max, rounds)
+                            msgs.append({"role": "assistant", "content": _msg_content or "", "thinking": msg.get("thinking") or ""})
+                            msgs.append({"role": "user", "content": _research_gate_nudge(user_content, _gate_tokens)})
+                            rounds += 1
+                            continue
                     # Halluziniertes Bild erkannt (base64 oder fake URL)? → strippen, Korrektur-Runde starten
                     if _has_hallucinated_image(_msg_content) and rounds < max_tool_rounds:
                         _log.info("Halluziniertes Bild erkannt — sende Korrektur-Nudge (Runde %d)", rounds)
@@ -6682,6 +6737,7 @@ def chat_round_stream(
     _gm_ctx = config.get("_chat_context") or {}
     _gm_allow = set(_gm_ctx.get("tools_allow") or []) if _gm_ctx.get("group_mode") else None
     tools_schema = get_tools_schema(config, allow=_lazy_tool_allow(config, user_content, _gm_allow))
+    system_prompt += _lazy_tools_hint(config, tools_schema, _gm_allow)
     models_cfg = config.get("models") or {}
     per_prov_fb = [resolve_model(config, fb) or fb for fb in (models_cfg.get("fallbacks") or []) if fb]
     global_fb = [resolve_model(config, fb) or fb for fb in (config.get("fallbacks") or []) if fb]
@@ -6744,6 +6800,13 @@ def chat_round_stream(
                 _display_s = _saved_paths_s
             _paths_info_s = "\n".join(f"- `{p}`" for p in _display_s)
             user_content = f"{user_content}\n\n[Hochgeladenes Bild gespeichert unter:]\n{_paths_info_s}"
+            try:
+                from miniassistant.room_images import record_image as _ri_rec
+                _who_up = _ctx_up_s.get("user_display") or _ctx_up_s.get("user_id") or "?"
+                for _p_up in _saved_paths_s:
+                    _ri_rec(config, _p_up, who=_who_up, kind="upload")
+            except Exception:
+                pass
         user_content, images = describe_images_with_vl_model(config, images, user_content, model)
 
     user_msg: dict[str, Any] = {"role": "user", "content": user_content}
@@ -6777,7 +6840,6 @@ def chat_round_stream(
     _read_url_count = 0            # read_url/check_url-Aufrufe (zählt auch als Recherche)
     _data_tool_count = 0          # alle daten-beschaffenden Tools (exec/curl, invoke_model, ...) — Research-Gate
     _has_search = bool(config.get("search_engines"))
-    _claim_kw = tuple(config.get("research_gate_keywords") or _CLAIM_KEYWORDS_DEFAULT)
 
     while rounds < max_tool_rounds:
         # Per-round smart compaction: after round 0, check if tool results grew context past budget.
@@ -7138,26 +7200,27 @@ def chat_round_stream(
             _rc = round_content or full_msg.get("content") or ""
             _rt = round_thinking or full_msg.get("thinking") or ""
 
-            # Research gate (output-based, language-agnostic): the answer asserts a price/version
-            # that is NOT in this round's tool output → discard the answer, send a search nudge
-            # anchored to the current question, retry. Replaces the old input-keyword heuristic
-            # (German-only, false alarm on schedule/"aktuelle"/"vergleich").
+            # Research gate (output-based, language-agnostic): flag price/version tokens not
+            # found in this round's tool output, then let the MODEL self-verify — false
+            # positives (reformatted dates etc.) just re-emit the full answer. Replaces the
+            # old input-keyword heuristic (German-only, false alarm on schedule/"aktuelle").
             if (_research_gate_enabled
                     and _research_gate_attempts < _research_gate_max
                     and _has_search
                     and _rc.strip()
-                    and rounds < max_tool_rounds - 1
-                    and _answer_has_unsourced_facts(_rc, _round_tool_sources(msgs, user_content))):
-                _research_gate_attempts += 1
-                _log.info("Research gate: unsourced price/version in answer — forcing research (attempt %d/%d, round %d)",
-                          _research_gate_attempts, _research_gate_max, rounds)
-                yield {"type": "status", "message": "🔎 Unbelegte Zahl erkannt — verifiziere erst per Websuche"}
-                if _rc in total_content:
-                    total_content = total_content.replace(_rc, "")
-                msgs.append({"role": "assistant", "content": _rc, "thinking": _rt})
-                msgs.append({"role": "user", "content": _research_gate_nudge(user_content)})
-                rounds += 1
-                continue
+                    and rounds < max_tool_rounds - 1):
+                _gate_tokens = _unsourced_fact_tokens(_rc, _round_tool_sources(msgs, user_content))
+                if _gate_tokens:
+                    _research_gate_attempts += 1
+                    _log.info("Research gate: unsourced tokens %s — self-verify nudge (attempt %d/%d, round %d)",
+                              _gate_tokens, _research_gate_attempts, _research_gate_max, rounds)
+                    yield {"type": "status", "message": "🔎 Zahlen-Check — verifiziere Antwort gegen Tool-Output"}
+                    if _rc in total_content:
+                        total_content = total_content.replace(_rc, "")
+                    msgs.append({"role": "assistant", "content": _rc, "thinking": _rt})
+                    msgs.append({"role": "user", "content": _research_gate_nudge(user_content, _gate_tokens)})
+                    rounds += 1
+                    continue
 
             # Halluziniertes Bild erkannt (base64 oder fake URL)? → strippen, Korrektur-Runde starten
             if _has_hallucinated_image(_rc) and rounds < max_tool_rounds:
@@ -7438,7 +7501,7 @@ def chat_round_stream(
             msgs.append({"role": "tool", "tool_name": _sn, "content": _sr})
 
         if _server_calls:
-            _stream_log._maybe_flush(force=True)
+            _stream_log.round_break()
             # Status-Callback einrichten: wait-Tool kann Fortschrittsmeldungen einstellen
             _tool_status_q: Queue = Queue()
             config["_tool_status_callback"] = _tool_status_q.put_nowait
@@ -8249,6 +8312,13 @@ def handle_user_input(
                 _display = _saved_paths
             _paths_info = "\n".join(f"- `{p}`" for p in _display)
             rest = f"{rest}\n\n[Hochgeladenes Bild gespeichert unter:]\n{_paths_info}"
+            try:
+                from miniassistant.room_images import record_image as _ri_rec
+                _who_up = _ctx_up.get("user_display") or _ctx_up.get("user_id") or "?"
+                for _p_up in _saved_paths:
+                    _ri_rec(config, _p_up, who=_who_up, kind="upload")
+            except Exception:
+                pass
         rest, images = describe_images_with_vl_model(config, images, rest, model)
 
     # Chat-Kontext (room_id/channel_id) in System-Prompt injizieren
@@ -8391,13 +8461,14 @@ def _onboarding_system_prompt(detected_system: dict[str, str]) -> str:
 1. **IDENTITY:** What should the assistant be called? **Which language should the assistant use for its replies?** (e.g. Deutsch, English) (optional: emoji e.g. 🤖; optional: vibe in one sentence)
 2. **SOUL:** Use default limits? (Run harmless commands without asking; answer briefly and factually; never expose tokens/passwords/private data) – or add/change something?
 3. **USER:** What should I call you? (Name, nickname), pronouns (Du/Sie or you/they). Timezone: show the detected timezone and ask if it's correct (if not, note the correct one and tell the user how to change it on the system). **Country (optional):** Which country are you in? (e.g. Austria, Germany, Switzerland, USA). This helps the assistant search with local context (prices, shops, domains). **Units preference (optional):** Should I use Celsius/Euro (EU default) or Fahrenheit/Dollar (US default)? If the user skips this, use EU default (Celsius, Euro) for EU countries, US default for USA. Optional preferences? Also ask: Would you like to tell me something about yourself? (hobbies, interests, job – anything that helps the assistant understand you better). **Important: USER.md has a 500 character limit.** Keep it concise.
-4. **AVATAR (optional):** Do you have a profile picture/avatar for the bot? (PNG file path or URL, e.g. `~/avatar.png` or `https://example.org/bot.png`). Best format: PNG, square (256x256 or 512x512). If provided as URL, validate with `check_url` first, then download to `agent_dir/avatar.png`. If a file path, copy to `agent_dir/avatar.png`. Save path in config via `save_config({{avatar: "<path>"}})`. If skipped, the default logo is used.
+4. **AVATAR (optional):** Do you have a profile picture/avatar for the bot? (PNG file path or URL, best square 256x256/512x512). **You have NO tools in this chat — you cannot check URLs, download or save anything.** If the user names one, just tell them to enter it after onboarding in the Config UI (`/config` → field "Avatar") or in config.yaml as `avatar: "<path or URL>"`. If skipped, the default logo is used.
 
 Optional: Any special paths or hints for the environment (TOOLS)? Otherwise the detected system above is enough.
 
 **Flow:**
 - On "Beginne das Onboarding" / "Start onboarding": Ask the first 2–3 questions and WAIT. Do not output file blocks yet.
 - After each user reply: ask the next question OR, when you have everything, output the four sections.
+- **Follow up on gaps:** If a required item is missing, ambiguous or contradictory after the user's reply (required: assistant name, response language, user name, timezone confirmed), ask SPECIFICALLY for that item before moving to the next question. Never fill a gap with an assumption. Optional items (emoji, vibe, country, units, hobbies, avatar): if the user skips or ignores them, move on — do NOT nag about optional items.
 - Fill the four sections only with **real** user input; do not invent.
 
 You only provide content; the user saves via button. Exact headings: "## SOUL.md", "## IDENTITY.md", "## TOOLS.md", "## USER.md".

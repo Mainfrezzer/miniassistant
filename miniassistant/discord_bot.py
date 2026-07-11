@@ -164,6 +164,13 @@ def fetch_recent_messages(channel_id: str, limit: int = 20, skip_message_id: str
                 if skip_message_id and str(msg.id) == str(skip_message_id):
                     continue
                 body = (msg.content or "").strip()
+                # Bild-Attachments als Marker in die History (Bezugspunkt für "das letzte Bild";
+                # der Pfad kommt aus dem room_images-Block).
+                _img_names = [a.filename for a in (getattr(msg, "attachments", None) or [])
+                              if str(getattr(a, "content_type", "") or "").startswith("image/")]
+                if _img_names:
+                    _marker = " ".join(f"[📷 Bild: {n}]" for n in _img_names)
+                    body = f"{body} {_marker}".strip() if body else _marker
                 if not body:
                     continue
                 author = msg.author
@@ -423,7 +430,7 @@ def _get_chat_response(
     # NICHT bei Slash-Befehlen (/new, /help, …): das Prepend würde den ^-verankerten
     # Command-Parser in handle_user_input aushebeln → Befehl landet als Prompt beim LLM.
     if ctx.get("group_mode") and channel_id and not is_chat_command(user_message):
-        ac_count, ac_max = get_auto_context_settings(rs)
+        ac_count, ac_max, ac_age = get_auto_context_settings(rs)
         if ac_count > 0:
             try:
                 bot_sender = ""
@@ -437,10 +444,12 @@ def _get_chat_response(
                 if prev and (prev[-1].get("body") or "").strip() == user_message.strip():
                     prev = prev[:-1]
                 prev = prev[-ac_count:] if len(prev) > ac_count else prev
-                blk = format_auto_context(prev, max_chars=ac_max, bot_sender=bot_sender)
-                if blk:
+                blk = format_auto_context(prev, max_chars=ac_max, bot_sender=bot_sender, max_age_min=ac_age)
+                from miniassistant.room_images import format_block as _ri_block
+                _img_blk = _ri_block(config, ctx)
+                if blk or _img_blk:
                     _who_now = base_ctx.get("user_display") or discord_user_id
-                    user_message = wrap_current_message(blk, _who_now, user_message)
+                    user_message = wrap_current_message(blk, _who_now, user_message, images_block=_img_blk)
             except Exception as _ac_err:
                 logger.debug("Discord auto-context fetch failed: %s", _ac_err)
     session_key = _sess_key(channel_id, discord_user_id, bool(ctx.get("group_mode")))
@@ -570,9 +579,41 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
             return
         if mode == "mention" and not (is_dm or is_mentioned):
             return
+        # Gruppe + always: Reply auf fremde Nachricht = Mensch-zu-Mensch → ignorieren,
+        # außer Bot ist mentioned oder Reply geht auf eine Bot-Nachricht.
+        if mode == "always" and not is_dm and not is_mentioned:
+            _ref0 = getattr(message, "reference", None)
+            if _ref0 is not None and getattr(_ref0, "message_id", None):
+                _rmsg = getattr(_ref0, "resolved", None)
+                if _rmsg is None:
+                    try:
+                        _rmsg = await message.channel.fetch_message(int(_ref0.message_id))
+                    except Exception:
+                        _rmsg = None  # nicht auflösbar → fail-open (antworten)
+                _rauthor = getattr(_rmsg, "author", None)
+                if _rauthor is not None and client.user is not None and _rauthor.id != client.user.id:
+                    logger.info("Discord: Channel %s mode=always — Reply an anderen User, ignoriert", ch_id)
+                    return
 
         sender_id = str(message.author.id)
         body = message.content.strip()
+
+        # Per-User-Tageslimit (channel_settings.user_daily_limit; 0/fehlt = unbegrenzt).
+        # Hinweis nur bei der ersten abgelehnten Nachricht des Tages, danach still.
+        if not is_dm:
+            from miniassistant.group_rooms import check_user_daily_limit as _chk_daily_limit
+            _dl = _chk_daily_limit(config, "discord", ch_id, sender_id)
+            if not _dl[0]:
+                logger.info("Discord: %s über Tageslimit in %s — Nachricht verworfen (notify=%s)", sender_id, ch_id, _dl[1])
+                if _dl[1]:
+                    await message.reply("Du hast dein tägliches Nachrichten-Limit in diesem Channel erreicht — morgen geht's weiter.")
+                return
+            # Tageslimit-Warnung: System-Notiz in den Model-Kontext — Model formuliert in User-Sprache.
+            if _dl[2] is not None:
+                body += (
+                    f"\n\n[System notice: this user has {_dl[2]} message(s) left today in this channel "
+                    f"(per-user daily limit). Briefly mention this at the end of your reply, in the user's language.]"
+                )
 
         # Bei @-Mention: Bot-Mention aus Text entfernen
         if is_mentioned and client.user is not None:

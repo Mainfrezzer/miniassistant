@@ -7,6 +7,14 @@ Per-room/-channel context mode for Matrix rooms and Discord channels.
 - **agent** (default for DMs / direct channels) — full personal context: SOUL, USER.md, Memory, Palace, Prefs, all tools, full identity. Behaves like everywhere else.
 - **group** (default for rooms with >2 members) — slim context: NO SOUL/USER/Memory/Palace/Owner-Prefs/Room-Last-Fire. Only AGENTS + IDENTITY (with optional language override) + Environment + slim tool list + Safety + Communication-Boundary + Runtime + per-room prefs (`/workspace/prefs/`) + speaker info + last-activity hints. Hard tool whitelist. `exec` runs in bwrap sandbox.
 
+## Response modes (`room_modes` / `channel_modes`)
+
+`always` | `mention` | `off` per room. In group rooms (>2 members) with `always`, a real
+quote-reply to ANOTHER user's message is treated as human-to-human and ignored — unless the
+bot is mentioned or the quoted message is the bot's own. Thread fallback replies
+(`is_falling_back`, Matrix) don't count as quotes. Membership events (joins/leaves) never
+trigger the bot (only `RoomMessage` callbacks are registered).
+
 ## Configuration
 
 WebUI: `/rooms` → gear button next to "Verlassen" → detail row.
@@ -21,6 +29,8 @@ WebUI: `/rooms` → gear button next to "Verlassen" → detail row.
 | `auto_context_max_chars` | 20–500 | 200 |
 | `docs_in_sandbox` | bool | false |
 | `search_chat_history_max` | 10–500 | 200 |
+| `user_daily_limit` | int ≥ 0 | 0 (= unlimited). Per-user messages/day; over-limit messages are dropped (one notice per user/day, then silent). In-memory counter — resets on restart and at midnight |
+| `user_daily_limit_warn` | int ≥ 0 | 0 (= no warning). When ≤ N messages remain, a system notice is injected into the model context so the model tells the user (in the user's language) how many are left |
 | `model_switch` | bool | false |
 | `models_allow` | list of model names/aliases | `[]` (= all configured) |
 | `model` | model name | `""` (= global default) |
