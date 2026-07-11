@@ -1133,6 +1133,7 @@ async def config_form_page(request: Request):
         {{ n:"doc_max_pages_render", t:"int", l:"doc_max_pages_render" }},
         {{ n:"image_edit_strength", t:"float", l:"image_edit_strength (global, 0-1; 1.0 = voller Denoise. Pro Modell via model_options im Raw-YAML)" }},
         {{ n:"image_edit_max_edge", t:"int", l:"image_edit_max_edge (max. Kantenlänge Quellbild beim Edit, Default 2048)" }},
+        {{ n:"image_json_prompt_models", t:"list_inline", l:"image_json_prompt_models (JSON-Prompt-Wrap gegen Safety-Filter-False-Positives; Modelle mit 'ideogram' im Namen sind IMMER aktiv, Liste ergänzt weitere)" }},
     ]}},
   ];
 

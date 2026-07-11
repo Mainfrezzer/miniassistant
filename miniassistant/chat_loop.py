@@ -4935,8 +4935,16 @@ def _run_subagent_openai(
                     **_img_kwargs,
                 )
             else:
+                # Ideogram-4-Klasse: Plain-Text-Prompts triggern den modell-internen
+                # Safety-Filter false-positiv → ins JSON-Caption-Format wrappen.
+                from miniassistant.openai_client import model_needs_json_prompt, wrap_json_image_prompt
+                _gen_prompt = user_msg
+                if model_needs_json_prompt(config, resolved_name, api_model):
+                    _gen_prompt = wrap_json_image_prompt(user_msg)
+                    if _gen_prompt != user_msg:
+                        _log.info("Image gen: prompt wrapped into JSON caption format for %s", resolved_name)
                 r = api_generate_image(
-                    user_msg, api_key=api_key, model=api_model,
+                    _gen_prompt, api_key=api_key, model=api_model,
                     base_url=base_url or OPENAI_API_URL,
                     **_img_kwargs,
                 )
@@ -4968,7 +4976,23 @@ def _run_subagent_openai(
                 except Exception as _dl_err:
                     _log.warning("Image download from server URL %s failed: %s", _server_url, _dl_err)
             if b64_data:
-                fpath.write_bytes(_b64.b64decode(b64_data))
+                _img_bytes = _b64.b64decode(b64_data)
+                # Safety-Filter-Platzhalter (graues PNG statt Bild) erkennen: der Filter
+                # liefert HTTP 200 + valides PNG → ohne Check würde der Platzhalter als
+                # "erfolgreich generiert" in den Chat gesendet.
+                from miniassistant.openai_client import model_needs_json_prompt as _mnjp, is_safety_placeholder_image
+                if _mnjp(config, resolved_name, api_model) and is_safety_placeholder_image(_img_bytes):
+                    err = (
+                        "Image gen blockiert: Der eingebaute Safety-Filter des Modells hat die "
+                        "Generierung geblockt (graues Platzhalter-Bild, KEIN Bild wurde gesendet). "
+                        "Der Filter hat eine hohe False-Positive-Rate. Optionen: 1) Prompt umformulieren "
+                        "und erneut versuchen (neutraler beschreiben, keine Marken-/Personennamen), "
+                        "2) ein anderes konfiguriertes Bildmodell verwenden. Informiere den User kurz, "
+                        "falls auch der zweite Versuch blockt."
+                    )
+                    _aal.log_subagent_result(config, resolved_name, err, "")
+                    return err
+                fpath.write_bytes(_img_bytes)
                 _op = "edited" if _edit_src else "generated"
                 _log.info("Image %s: saved %s", _op, fpath)
                 # Bild in _pending_images speichern (NICHT in Tool-Response!).

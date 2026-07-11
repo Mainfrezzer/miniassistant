@@ -1358,6 +1358,16 @@ def _vision_section(config: dict[str, Any], current_model: str | None = None) ->
         lines.append(f"  **Copy the model name EXACTLY as shown — including any `provider/` prefix.**")
         docs = _docs_dir_path(config)
         img_doc = str(docs / "IMAGE_GENERATION.md") if docs else "docs/IMAGE_GENERATION.md"
+        from miniassistant.openai_client import model_needs_json_prompt as _mnjp_doc
+        _json_prompt_models = [m for m in img_gen_models if _mnjp_doc(config, m)]
+        if _json_prompt_models:
+            _jm_str = ", ".join(f"`{m}`" for m in _json_prompt_models)
+            lines.append(
+                f"  **{_jm_str}: built-in safety filter, false-positives on plain text.** "
+                "Plain prompts are auto-wrapped into the required JSON caption format. For fine control "
+                f"(composition, exact text, colors) pass the full JSON schema from `{img_doc}` as `message`. "
+                "If a generation comes back blocked, rephrase neutrally or switch to another image model."
+            )
         lines.append(f"  For details on generate vs edit: read `{img_doc}`.")
         lines.append(
             "- **After generating/editing an image:** Use `send_image(image_path='/path/to/image.png', caption='...')` to upload it to the current chat. "

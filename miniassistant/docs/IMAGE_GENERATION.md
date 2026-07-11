@@ -76,6 +76,38 @@ Users often use informal or German words for technical parameters. Map them corr
 | "erstelle ein ähnliches Bild wie dieses" (+ uploaded image) | **Edit** with high strength (~0.8) |
 | Bild hochgeladen ohne Text / "was ist das?" | **Vision/Analyse** — do NOT edit, just describe |
 
+## Ideogram-class models — JSON prompts & safety filter
+
+Ideogram 4 (and models listed in config `image_json_prompt_models`) has a safety filter **baked into the model weights**. It cannot be disabled. On plain-text prompts it false-positives constantly — even a harmless donut gets a gray "Image blocked by safety filter" placeholder instead of an image. The model is trained on **structured JSON captions**; JSON prompts drastically reduce false blocks and improve composition.
+
+**What happens automatically:** plain-text prompts to these models are auto-wrapped into a minimal JSON caption, and returned placeholder images are detected and reported as an error instead of being sent to the user.
+
+**For best quality**, pass the full JSON schema yourself as the `message`:
+
+```json
+{
+  "high_level_description": "1-2 sentence scene summary.",
+  "style_description": {
+    "aesthetics": "mood keywords",
+    "lighting": "lighting description",
+    "medium": "photograph | 3D render | oil painting | ...",
+    "art_style": "only for non-photos; for photos use key \"photo\" BEFORE medium instead",
+    "color_palette": ["#RRGGBB", "..."]
+  },
+  "compositional_deconstruction": {
+    "background": "environment description",
+    "elements": [
+      {"type": "obj", "bbox": [0, 0, 1000, 1000], "desc": "object description"},
+      {"type": "text", "bbox": [100, 100, 300, 900], "text": "EXACT TEXT", "desc": "font/style"}
+    ]
+  }
+}
+```
+
+Rules: `bbox` = `[y_min, x_min, y_max, x_max]` in 0–1000 normalized coordinates. `style_description` needs exactly one of `photo`/`art_style`. Key order matters (objects: type, bbox, desc, color_palette). Send the raw JSON as the message — no surrounding prose, code fences are tolerated.
+
+**If a generation is still blocked:** rephrase more neutrally (avoid brand names, celebrity/person names, violence-adjacent words) and retry once, or use another configured image model (e.g. flux/krea have no such filter). Inform the user if it stays blocked.
+
 ## CRITICAL — NEVER generate fake images
 
 **NEVER** output `![...](data:image/png;base64,...)` or any base64-encoded image data in your response text. You CANNOT generate images by writing base64 — that produces garbage data, not a real image. **ALWAYS** use `invoke_model` with a configured image generation model, then `send_image` to deliver it. There is no shortcut.

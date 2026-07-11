@@ -46,6 +46,12 @@ _PASSTHROUGH_TUNING_KEYS = (
     # Image-Edit-Tuning: strength-Default (1.0 = voller Denoise, nötig damit qwen-image-edit
     # & Co. die Instruktion anwenden); max_edge cappt Quell-Auflösung.
     "image_edit_strength", "image_edit_max_edge",
+    # Ideogram-4 & Co.: Modelle mit eingebautem Safety-Filter, der Plain-Text-Prompts
+    # oft false-positiv blockt (graues "Image blocked by safety filter"-PNG statt Bild).
+    # Prompts an diese Modelle werden in das strukturierte JSON-Caption-Format gewrappt
+    # (deutlich niedrigere Block-Rate) und Platzhalter-PNGs als Fehler erkannt.
+    # Default: alle Modelle mit "ideogram" im Namen. Liste ergänzt (ersetzt nicht) den Default.
+    "image_json_prompt_models",
     # Advanced/AIO-Prompt: {enabled: bool, file: path} — ersetzt den ganzen System-Prompt.
     "advanced_prompt", "knowledge_cutoff",
     # OpenCode coding-connector: {enabled, default_repo, jobs_dir, max_concurrent,

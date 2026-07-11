@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from typing import Any, Generator
 
 import httpx
@@ -612,6 +613,72 @@ def api_chat_stream(
 # ═══════════════════════════════════════════════════════════════════════════
 # Image Generation (DALL-E)
 # ═══════════════════════════════════════════════════════════════════════════
+
+def model_needs_json_prompt(config: dict[str, Any], *names: str) -> bool:
+    """True wenn das Bildmodell strukturierte JSON-Prompts braucht (Ideogram-4-Klasse).
+
+    Ideogram 4 (open weights) hat einen ins Modell eingebauten Safety-Filter, der bei
+    Plain-Text-Prompts mit hoher False-Positive-Rate ein graues Platzhalter-PNG
+    ("Image blocked by safety filter") liefert — auch bei völlig harmlosen Motiven.
+    JSON-Caption-Prompts (Trainingsformat) senken die Block-Rate drastisch.
+    Default: Modellname enthält "ideogram". `image_json_prompt_models` (Config,
+    top-level Liste) ergänzt den Default um weitere Modellnamen."""
+    extra = {str(m).strip().lower() for m in (config.get("image_json_prompt_models") or [])}
+    for n in names:
+        if not n:
+            continue
+        ln = str(n).strip().lower()
+        if "ideogram" in ln or ln in extra or ln.split("/", 1)[-1] in extra:
+            return True
+    return False
+
+
+def wrap_json_image_prompt(prompt: str) -> str:
+    """Wrappt einen Plain-Text-Prompt ins Ideogram-4 JSON-Caption-Format.
+
+    Bereits strukturierte JSON-Prompts (Orchestrator liefert das volle Schema mit
+    high_level_description/style_description/compositional_deconstruction) gehen
+    unverändert durch — inkl. Entfernen von Markdown-Codefences."""
+    text = prompt.strip()
+    # Codefence-Wrapper (```json ... ```) entfernen
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and (
+                "high_level_description" in parsed or "compositional_deconstruction" in parsed
+            ):
+                return text
+        except Exception:
+            pass
+    return json.dumps({
+        "high_level_description": text,
+        "compositional_deconstruction": {
+            "background": "A simple, clean background that naturally fits the described scene.",
+            "elements": [{"type": "obj", "bbox": [100, 100, 900, 900], "desc": text}],
+        },
+    }, ensure_ascii=False)
+
+
+def is_safety_placeholder_image(image_bytes: bytes) -> bool:
+    """Erkennt das graue "Image blocked by safety filter"-Platzhalter-PNG (Ideogram 4).
+
+    Der Filter liefert keinen HTTP-Fehler, sondern ein nahezu uniformes Graubild mit
+    Textzeile — für den Aufrufer sieht die Generierung erfolgreich aus. Heuristik:
+    Graustufen-Stddev < 16 (gemessen: Platzhalter ~11, echte Bilder 35+). Nur für
+    Modelle aus model_needs_json_prompt aufrufen, um False-Positives bei legitim
+    minimalistischen Bildern anderer Modelle zu vermeiden."""
+    try:
+        import io
+        from PIL import Image, ImageStat
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            stddev = ImageStat.Stat(im.convert("L")).stddev[0]
+        return stddev < 16.0
+    except Exception:
+        return False
+
 
 def _build_sd_cpp_extra_args(
     *,
