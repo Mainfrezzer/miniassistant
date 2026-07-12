@@ -2,7 +2,7 @@
 
 ## Your role when changing config
 
-1. **If something is missing** (token, homeserver, device_id for Matrix; bot_token for Discord): ask the user for it and show the relevant example below. Do not write config until you have the required values.
+1. **If something is missing** (token, homeserver, device_id for Matrix; bot_token for Discord/Telegram): ask the user for it and show the relevant example below. Do not write config until you have the required values.
 2. **When the user provides the data:** use the **save_config** tool with the full YAML content. It validates the config, creates up to 4 backups (`.bak`, `.bak.1`, …), then writes. Do **not** use exec to write the config file. Preserve existing keys; only add or change what the user requested.
 3. **After writing config:** tell the user they must **restart the service** (e.g. `miniassistant serve` or the process that runs the bot) for changes to take effect.
 
@@ -143,6 +143,9 @@ chat_clients:
   discord:
     enabled: true
     bot_token: "discord-bot-token"
+  telegram:
+    enabled: true
+    bot_token: "123456789:telegram-bot-token"
 
 memory:
   max_chars_per_line: 300                    # Fallback only — NOT used when mempalace.enabled: true
@@ -459,7 +462,7 @@ email:
 
 ## Voice setup (Wyoming STT + TTS)
 
-Voice enables speech-to-text (STT) and text-to-speech (TTS) for Matrix and Discord.
+Voice enables speech-to-text (STT) and text-to-speech (TTS) for Matrix, Discord and Telegram.
 Requires: `ffmpeg` system package + running Wyoming STT/TTS servers.
 
 Three TTS backends supported:
@@ -519,6 +522,7 @@ voice:
 **How voice works:**
 - Matrix: incoming `m.audio` messages → STT → agent → TTS → audio reply
 - Discord: audio attachments (ogg, mp3, wav, m4a, webm) → STT → agent → TTS → WAV attachment
+- Telegram: voice/audio messages → STT → agent → TTS → audio reply
 - Messages transcribed with `[Voice]` prefix so agent responds in spoken language (concise, no markdown)
 - If TTS is not configured, agent replies in text
 - Tables and code blocks are always sent as separate text messages

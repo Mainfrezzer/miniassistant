@@ -634,10 +634,13 @@ def serve(ctx: click.Context, host: str | None, port: int | None) -> None:
     cc = config.get("chat_clients") or {}
     mc = cc.get("matrix")
     dc = cc.get("discord")
+    tc = cc.get("telegram")
     if mc and mc.get("enabled", True) and mc.get("token") and mc.get("user_id"):
         console.print("Matrix-Bot: [green]aktiv[/green]")
     if dc and dc.get("enabled", True) and dc.get("bot_token"):
         console.print("Discord-Bot: [green]aktiv[/green]")
+    if tc and tc.get("enabled", True) and tc.get("bot_token"):
+        console.print("Telegram-Bot: [green]aktiv[/green]")
     from miniassistant.web.app import app
     # Projektverzeichnis für Sessions (Config/Memory/Agent aus diesem Ordner bei -C)
     app.state.project_dir = ctx.obj.get("project_dir")

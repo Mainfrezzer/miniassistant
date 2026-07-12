@@ -110,7 +110,9 @@ def _normalize_code(raw: str) -> str:
     """Entfernt Präfixe wie '/auth matrix ' oder '/auth discord ' und gibt den Code zurück."""
     raw = (raw or "").strip()
     low = raw.lower()
-    for prefix in ("auth matrix", "auth discord", "auth", "/auth matrix", "/auth discord", "/auth", "matrix", "discord"):
+    for prefix in ("auth matrix", "auth discord", "auth telegram", "auth",
+                   "/auth matrix", "/auth discord", "/auth telegram", "/auth",
+                   "matrix", "discord", "telegram"):
         if low.startswith(prefix):
             raw = raw[len(prefix):].strip()
             break

@@ -1,5 +1,5 @@
 """
-Benachrichtigungen an Chat-Clients senden (Matrix, Discord).
+Benachrichtigungen an Chat-Clients senden (Matrix, Discord, Telegram).
 Wird vom /api/notify Endpoint und vom Scheduler genutzt.
 Leichtgewichtig: eigene HTTP-Calls, keine laufenden Bot-Instanzen noetig.
 """
@@ -26,6 +26,12 @@ def _is_valid_discord_id(value: Any) -> bool:
     return s.isdigit() and 1 <= len(s) <= 32
 
 
+def _is_valid_telegram_id(value: Any) -> bool:
+    """Telegram Chat-/User-IDs sind Integers (Gruppen negativ, z.B. -100123…)."""
+    s = str(value or "").strip()
+    return s.lstrip("-").isdigit() and 1 <= len(s) <= 32
+
+
 def send_notification(
     message: str,
     client: str | None = None,
@@ -35,7 +41,7 @@ def send_notification(
 ) -> dict[str, str]:
     """
     Sendet eine Nachricht an konfigurierte Chat-Clients.
-    client: 'matrix', 'discord' oder None (= alle konfigurierten).
+    client: 'matrix', 'discord', 'telegram' oder None (= alle konfigurierten).
     room_id: Direkt in diesen Matrix-Raum senden (statt an alle User).
     channel_id: Direkt in diesen Discord-Channel senden (statt an alle User).
     Returns dict mit Ergebnissen pro Client.
@@ -65,9 +71,82 @@ def send_notification(
         elif client == "discord":
             results["discord"] = "nicht konfiguriert"
 
+    if client is None or client == "telegram":
+        tc = cc.get("telegram")
+        if tc and tc.get("enabled", True) and tc.get("bot_token"):
+            if channel_id:
+                results["telegram"] = _send_telegram_to_chat(tc, message, channel_id)
+            else:
+                results["telegram"] = _send_telegram(tc, message, config.get("_config_dir") if config else None)
+        elif client == "telegram":
+            results["telegram"] = "nicht konfiguriert"
+
     if not results:
         results["error"] = "Kein Chat-Client konfiguriert"
     return results
+
+
+def _telegram_api(tc: dict[str, Any], method: str, payload: dict[str, Any] | None = None,
+                  files: dict[str, Any] | None = None, timeout: float = 30) -> tuple[bool, str]:
+    """Raw Telegram Bot-API-Call (kein laufender Bot nötig). Returns (ok, error)."""
+    import httpx
+    bot_token = tc.get("bot_token", "")
+    if not bot_token:
+        return False, "bot_token fehlt"
+    url = f"https://api.telegram.org/bot{bot_token}/{method}"
+    try:
+        if files:
+            r = httpx.post(url, data=payload or {}, files=files, timeout=timeout)
+        else:
+            r = httpx.post(url, json=payload or {}, timeout=timeout)
+        data = r.json()
+        if not data.get("ok"):
+            return False, str(data.get("description") or "unbekannter Fehler")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _send_telegram_to_chat(tc: dict[str, Any], message: str, chat_id: str) -> str:
+    """Sendet eine Nachricht direkt in einen bestimmten Telegram-Chat.
+    Bevorzugt über den laufenden Bot (recorded dann im History-Cache), sonst raw HTTP."""
+    if not _is_valid_telegram_id(chat_id):
+        logger.warning("Telegram -> Chat %r abgelehnt (keine gueltige Chat-ID)", chat_id)
+        return "ungueltige chat_id"
+    try:
+        from miniassistant.telegram_bot import is_running, send_message_to_chat
+        if is_running() and send_message_to_chat(chat_id, message):
+            logger.info("Telegram -> Chat %s (via Bot)", chat_id)
+            return f"gesendet in Chat {chat_id}"
+    except Exception as e:
+        logger.debug("Telegram Bot -> Chat %s fehlgeschlagen: %s", chat_id, e)
+    ok, err = _telegram_api(tc, "sendMessage", {"chat_id": chat_id, "text": message})
+    if ok:
+        logger.info("Telegram -> Chat %s (via HTTP)", chat_id)
+        return f"gesendet in Chat {chat_id}"
+    return f"senden fehlgeschlagen: {err}"
+
+
+def _send_telegram(tc: dict[str, Any], message: str, config_dir: str | None = None) -> str:
+    """Sendet an alle autorisierten Telegram-User (User-ID == Chat-ID bei privaten Chats)."""
+    try:
+        from miniassistant.chat_auth import list_authorized
+        authorized = list_authorized("telegram", config_dir)
+    except Exception:
+        authorized = []
+    if not authorized:
+        return "keine autorisierten Telegram-User"
+    sent_to: list[str] = []
+    for entry in authorized:
+        uid = entry.get("user_id", entry) if isinstance(entry, dict) else entry
+        if not uid or not isinstance(uid, str) or not _is_valid_telegram_id(uid):
+            continue
+        ok, err = _telegram_api(tc, "sendMessage", {"chat_id": uid, "text": message})
+        if ok:
+            sent_to.append(uid)
+        else:
+            logger.warning("Telegram -> %s fehlgeschlagen: %s", uid, err)
+    return f"gesendet an {len(sent_to)} User" if sent_to else "senden fehlgeschlagen"
 
 
 def _send_matrix(mc: dict[str, Any], message: str, config_dir: str | None = None) -> str:
@@ -223,7 +302,7 @@ def send_image(
     channel_id: str | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Sendet ein Bild an Chat-Clients (Matrix/Discord).
+    """Sendet ein Bild an Chat-Clients (Matrix/Discord/Telegram).
     room_id/channel_id: Direkt an diesen Raum/Channel senden (aus chat_context).
     Ohne room_id/channel_id: an alle autorisierten User senden."""
     if config is None:
@@ -245,9 +324,59 @@ def send_image(
         elif client == "discord":
             results["discord"] = "nicht konfiguriert"
 
+    if client is None or client == "telegram":
+        tc = cc.get("telegram")
+        if tc and tc.get("enabled", True) and tc.get("bot_token"):
+            results["telegram"] = _send_telegram_image(tc, image_path, caption, chat_id=channel_id, config_dir=config.get("_config_dir"))
+        elif client == "telegram":
+            results["telegram"] = "nicht konfiguriert"
+
     if not results:
         results["error"] = "Kein Chat-Client konfiguriert"
     return results
+
+
+def _telegram_target_chats(chat_id: str | None, config_dir: str | None) -> list[str] | str:
+    """Ziel-Chats: expliziter Chat oder alle autorisierten User. String = Fehlermeldung."""
+    if chat_id:
+        if not _is_valid_telegram_id(chat_id):
+            return "ungueltige chat_id"
+        return [str(chat_id).strip()]
+    try:
+        from miniassistant.chat_auth import list_authorized
+        authorized = list_authorized("telegram", config_dir)
+    except Exception:
+        authorized = []
+    chats = []
+    for entry in authorized:
+        uid = entry.get("user_id", entry) if isinstance(entry, dict) else entry
+        if uid and isinstance(uid, str) and _is_valid_telegram_id(uid):
+            chats.append(uid)
+    return chats if chats else "keine autorisierten Telegram-User"
+
+
+def _send_telegram_image(tc: dict[str, Any], image_path: str, caption: str = "", chat_id: str | None = None, config_dir: str | None = None) -> str:
+    """Sendet ein Bild via Telegram sendPhoto (multipart upload)."""
+    from pathlib import Path as _Path
+    p = _Path(image_path)
+    if not p.exists():
+        return f"Datei nicht gefunden: {image_path}"
+    chats = _telegram_target_chats(chat_id, config_dir)
+    if isinstance(chats, str):
+        return chats
+    img_bytes = p.read_bytes()
+    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}.get(p.suffix.lower(), "image/png")
+    sent = 0
+    for cid in chats:
+        payload = {"chat_id": cid}
+        if caption:
+            payload["caption"] = caption[:1024]
+        ok, err = _telegram_api(tc, "sendPhoto", payload, files={"photo": (p.name, img_bytes, mime)})
+        if ok:
+            sent += 1
+        else:
+            logger.warning("Telegram Bild -> Chat %s fehlgeschlagen: %s", cid, err)
+    return f"Bild gesendet an {sent} Chat(s)" if sent else "Bild senden fehlgeschlagen"
 
 
 def _send_matrix_image(mc: dict[str, Any], image_path: str, caption: str = "", room_id: str | None = None, config_dir: str | None = None) -> str:
@@ -446,9 +575,32 @@ def send_audio(
         elif client == "discord":
             results["discord"] = "nicht konfiguriert"
 
+    if client is None or client == "telegram":
+        tc = cc.get("telegram")
+        if tc and tc.get("enabled", True) and tc.get("bot_token"):
+            results["telegram"] = _send_telegram_audio(tc, wav_bytes, chat_id=channel_id, config_dir=config.get("_config_dir"))
+        elif client == "telegram":
+            results["telegram"] = "nicht konfiguriert"
+
     if not results:
         results["error"] = "Kein Chat-Client konfiguriert"
     return results
+
+
+def _send_telegram_audio(tc: dict[str, Any], wav_bytes: bytes, chat_id: str | None = None, config_dir: str | None = None) -> str:
+    """Sendet Audio via Telegram sendAudio (WAV-Upload)."""
+    chats = _telegram_target_chats(chat_id, config_dir)
+    if isinstance(chats, str):
+        return chats
+    sent = 0
+    for cid in chats:
+        ok, err = _telegram_api(tc, "sendAudio", {"chat_id": cid},
+                                files={"audio": ("response.wav", wav_bytes, "audio/wav")})
+        if ok:
+            sent += 1
+        else:
+            logger.warning("Telegram Audio -> Chat %s fehlgeschlagen: %s", cid, err)
+    return f"Audio gesendet an {sent} Chat(s)" if sent else "Audio senden fehlgeschlagen"
 
 
 def _send_matrix_audio(mc: dict[str, Any], wav_bytes: bytes, room_id: str | None = None, config_dir: str | None = None) -> str:

@@ -551,7 +551,7 @@ def _tools_schema(
                         "prompt": {"type": "string", "description": "Plain language task to execute at the scheduled time. Examples: 'List open issues from GitHub repo OWNER/REPO' or 'Search weather for City X from 3 sources and summarize'. NEVER put shell commands or exec:/tool syntax here — write WHAT to do, not HOW. NEVER paste a pre-written answer."},
                         "command": {"type": "string", "description": "Shell command to run (optional). Output is included in prompt context if both set."},
                         "when": {"type": "string", "description": "Cron 5 fields in local system time (e.g. '30 7 * * *' = 7:30) or 'in 30 minutes' / 'in 1 hour'"},
-                        "client": {"type": "string", "description": "Delivery target: 'matrix', 'discord', or 'none' (run but don't send anywhere). Omit to inherit current context (Matrix Room ID / Discord Channel ID shown in system prompt). If Platform is 'web' or 'api': ask the user which room/channel to deliver to, or use 'none' if they don't want a notification."},
+                        "client": {"type": "string", "description": "Delivery target: 'matrix', 'discord', 'telegram', or 'none' (run but don't send anywhere). Omit to inherit current context (Matrix Room ID / Discord Channel ID / Telegram Chat ID shown in system prompt). If Platform is 'web' or 'api': ask the user which room/channel to deliver to, or use 'none' if they don't want a notification."},
                         "once": {"type": "boolean", "description": "true = run once then delete (use for reminders, one-time notifications, 'einmalig', 'remind me once'). false = recurring. 'in N minutes/hours' is always once."},
                         "model": {"type": "string", "description": "Model name or alias for the prompt (e.g. 'qwen3', 'ollama-online/kimi-k2.5'). Default: current default model. Use this to control cost and capability."},
                         "id": {"type": "string", "description": "Job ID (or prefix) for action='remove'."},
@@ -597,7 +597,7 @@ def _tools_schema(
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "string", "description": "Platform ID (matrix: @user:server, discord: numeric)"},
+                    "user_id": {"type": "string", "description": "Platform ID (matrix: @user:server, discord/telegram: numeric)"},
                 },
                 "required": ["user_id"],
             },
@@ -671,7 +671,7 @@ def _tools_schema(
                         "action": {"type": "string", "enum": ["create", "list", "remove", "info", "last_output"], "description": "create (default), list, remove, info, last_output"},
                         "name": {"type": "string", "description": "Optional slug ^[a-z0-9][a-z0-9_-]{0,63}$ — used as directory and human handle"},
                         "prompt": {"type": "string", "description": "Optional default prompt executed on each fire. Empty = open webhook (caller must supply prompt per POST). Plain language WHAT to produce — never 'send it'/'post it'/'reply via X' since the response is auto-delivered."},
-                        "client": {"type": "string", "description": "Default delivery target: 'matrix', 'discord', or 'none'. If omitted: inherits current chat context."},
+                        "client": {"type": "string", "description": "Default delivery target: 'matrix', 'discord', 'telegram', or 'none'. If omitted: inherits current chat context."},
                         "model": {"type": "string", "description": "Model name/alias for the webhook task. Default: server default."},
                         "silent": {"type": "boolean", "description": "true = no chat push, output only saved to file. false = push to chat."},
                         "save_output": {"type": "boolean", "description": "true = also save output to file (default true)"},
@@ -712,7 +712,7 @@ def _tools_schema(
         "type": "function",
         "function": {
             "name": "save_config",
-            "description": "CALL THIS FUNCTION to actually update the config. Writing YAML in your response text does NOT save anything — you MUST call this function. Your YAML is deep-merged into the existing config (existing keys are preserved). Validates, creates .bak backups, then writes. After saving, tell user to restart. Structure: providers.ollama.models.aliases for model aliases, providers.ollama.models.default for default model, providers.ollama.model_options.<model>.think for per-model thinking, chat_clients.matrix/discord for bots, search_engines for SearXNG, voice for Wyoming STT/TTS. Read CONFIG_REFERENCE.md for full structure.",
+            "description": "CALL THIS FUNCTION to actually update the config. Writing YAML in your response text does NOT save anything — you MUST call this function. Your YAML is deep-merged into the existing config (existing keys are preserved). Validates, creates .bak backups, then writes. After saving, tell user to restart. Structure: providers.ollama.models.aliases for model aliases, providers.ollama.models.default for default model, providers.ollama.model_options.<model>.think for per-model thinking, chat_clients.matrix/discord/telegram for bots, search_engines for SearXNG, voice for Wyoming STT/TTS. Read CONFIG_REFERENCE.md for full structure.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -819,7 +819,7 @@ def _tools_schema(
         "type": "function",
         "function": {
             "name": "send_image",
-            "description": "Send an image file to the current chat (Matrix room or Discord channel). Use after generating or downloading an image. The image is uploaded via the bot client (E2EE-capable). For Web-UI: returns the file path instead. IMPORTANT: When this tool succeeds, the user already sees the image — do NOT send an additional text confirmation. The image IS the response. Only reply with text if the tool fails.",
+            "description": "Send an image file to the current chat (Matrix room, Discord channel or Telegram chat). Use after generating or downloading an image. The image is uploaded via the bot client (E2EE-capable). For Web-UI: returns the file path instead. IMPORTANT: When this tool succeeds, the user already sees the image — do NOT send an additional text confirmation. The image IS the response. Only reply with text if the tool fails.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -851,7 +851,7 @@ def _tools_schema(
     cc = config.get("chat_clients") or {}
     has_clients = any(
         (cc.get(k) or config.get(k) or {}).get("enabled", True) and ((cc.get(k) or config.get(k) or {}).get("token") or (cc.get(k) or config.get(k) or {}).get("bot_token"))
-        for k in ("matrix", "discord")
+        for k in ("matrix", "discord", "telegram")
     )
     if has_clients:
         schema.append({

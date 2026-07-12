@@ -15,7 +15,7 @@ avatar: "https://example.org/bot.png"  # URL (will be downloaded)
 
 If `avatar` is not set in config, check `agent_dir/avatar.png`. If that doesn't exist, the default logo is used.
 
-**Format:** PNG recommended (works everywhere: Matrix, Discord, Web-UI). Square aspect ratio (e.g. 256x256 or 512x512). Max ~2 MB.
+**Format:** PNG recommended (works everywhere: Matrix, Discord, Web-UI). Telegram bot avatars canNOT be set via API — only manually via @BotFather (`/setuserpic`); tell the user that. Square aspect ratio (e.g. 256x256 or 512x512). Max ~2 MB.
 
 ## URL validation
 

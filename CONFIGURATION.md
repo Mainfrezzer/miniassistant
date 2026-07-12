@@ -31,7 +31,7 @@ Alle Einstellungen sind **optional**. Was nicht gesetzt ist, nutzt sinnvolle Def
 - **default_search_engine** – (optional) Welche Engine standardmäßig genutzt wird; fehlt sie, gilt die erste.
 - **max_chars_per_file** – Zeichenlimit pro Agent-Datei im System-Prompt
 - **scheduler** – (optional) Geplante Jobs (Cron/„in N Minuten“) via Tool `schedule`
-- **chat_clients** – (optional) Chat-Clients: Matrix und Discord
+- **chat_clients** – (optional) Chat-Clients: Matrix, Discord und Telegram
 - **email** – (optional) E-Mail-Konten (IMAP/SMTP). Mehrere Konten möglich; der Assistent kann Mails lesen, schreiben und senden über die eingebauten `send_email` und `read_email` Tools.
 - **onboarding_complete** – (intern) Wird **nur** auf `true` gesetzt, wenn in der Web-UI beim Onboarding/Setup auf **„Speichern”** geklickt wurde. Das CLI-`config` legt nur Config und Agent-Dateien an und setzt dieses Flag **nicht** – so bleibt der Onboarding-Button sichtbar, bis der Nutzer das Setup in der Web-UI abschließt und speichert. Default: `false`.
 - **memory** – (optional) Einstellungen für den Memory-Auszug im System-Prompt (z. B. `max_chars_per_line`).
@@ -471,13 +471,13 @@ read_url:
 | `stream_loop_freq_threshold` | integer | nein | `5` | Doom-Loop-Detektor: gleiche Zeile N× im 30-Zeilen-Fenster (`stream_loop_freq_window`) → Abbruch. Bei Output mit legitimen Wiederholungen (Changelogs mit gleichen Commit-Messages) ggf. erhöhen (`8`). |
 | `schedule_slim_prompt` | boolean | nein | `true` | Scheduled/Webhook-Tasks bekommen einen schlanken System-Prompt: Persona (SOUL/IDENTITY/USER), Environment und alle Verhaltensregeln bleiben; Chat-Memory/Palace, Prefs sowie Vision/Voice-Abschnitte entfallen (kein Chat-Kontext nötig, Directions definieren Format selbst). Spart ~2k Tokens pro Run. `false` = voller Prompt wie im Chat. |
 | `schedule_lazy_tools` | boolean | nein | `true` | Scheduled/Webhook-Tasks laden nur Core-Tool-Schemas (exec, web_search, read_url, invoke_model, send_image, …) plus per Keyword getriggerte Gruppen. In der Task referenzierte `directions/*.md` werden für den Keyword-Scan vorgelesen, damit dort verlangte Tools (z. B. email) geladen werden. `false` = alle Tool-Schemas wie bisher. |
-| `chat_clients` | Objekt | nein | (nicht gesetzt) | Chat-Client-Anbindungen (Matrix, Discord). Siehe unten. |
+| `chat_clients` | Objekt | nein | (nicht gesetzt) | Chat-Client-Anbindungen (Matrix, Discord, Telegram). Siehe unten. |
 
 ---
 
 ## 7a. chat_clients
 
-Chat-Clients werden unter `chat_clients:` konfiguriert. Momentan unterstuetzt: **Matrix** und **Discord**.
+Chat-Clients werden unter `chat_clients:` konfiguriert. Momentan unterstuetzt: **Matrix**, **Discord** und **Telegram**.
 
 ### Matrix
 
@@ -519,11 +519,46 @@ Chat-Clients werden unter `chat_clients:` konfiguriert. Momentan unterstuetzt: *
 
 **Nachrichten-Formatierung:** Discord unterstuetzt nativ Markdown - keine Konvertierung noetig.
 
-**Befehle:** `/model MODELLNAME` und `/models` funktionieren in Matrix und Discord. **`/new`** (neue Session, Verlauf leeren, Memory bleibt im Prompt) wirkt nur in **Web-UI und CLI** – in Matrix und Discord wird `/new` ignoriert (keine Antwort), da dort pro Nutzer ohnehin eine Session läuft. **Alle Befehle können auch mit `:` statt `/` eingegeben werden** (z.B. `:new`, `:model NAME`), was besonders auf Matrix-Mobile nützlich ist, da dort `/`-Befehle vom Client abgefangen werden.
+**Befehle:** `/model MODELLNAME` und `/models` funktionieren in Matrix, Discord und Telegram. **`/new`** (neue Session, Verlauf leeren, Memory bleibt im Prompt) wirkt nur in **Web-UI und CLI** – in Matrix und Discord wird `/new` ignoriert (keine Antwort), da dort pro Nutzer ohnehin eine Session läuft. **Alle Befehle können auch mit `:` statt `/` eingegeben werden** (z.B. `:new`, `:model NAME`), was besonders auf Matrix-Mobile nützlich ist, da dort `/`-Befehle vom Client abgefangen werden.
 
-### Gruppenraeume: room_modes & room_settings (Matrix) / channel_modes & channel_settings (Discord)
+### Telegram
 
-Am einfachsten ueber die **Web-UI unter `/rooms`** konfigurierbar (Zahnrad-Button pro Raum) — die Keys landen in der Config unter `chat_clients.matrix.room_settings.<room_id>` bzw. `chat_clients.discord.channel_settings.<channel_id>`.
+**Keine Extra-Abhaengigkeit** — der Telegram-Bot laeuft ueber die Bot-HTTP-API (Long-Polling, httpx ist bereits Teil der Basis-Installation).
+
+**Config:**
+
+| Schluessel | Typ | Pflicht? | Default | Beschreibung |
+|-----------|-----|----------|---------|--------------|
+| `enabled` | boolean | nein | `true` | `false` = Telegram-Bot nicht starten. |
+| `bot_token` | string | ja | - | Bot-Token von @BotFather. |
+
+```yaml
+chat_clients:
+  telegram:
+    enabled: true
+    bot_token: "123456789:AAF..."
+```
+
+**Telegram-Bot einrichten:**
+
+1. In Telegram **@BotFather** anschreiben, `/newbot`, Name + Username (endet auf `bot`) waehlen.
+2. Den Token aus der BotFather-Antwort in die Config eintragen, Service neu starten.
+3. **Fuer Gruppen wichtig:** Bei BotFather `/setprivacy` → **Disable** setzen. Sonst sieht der Bot in Gruppen nur @-Mentions und Commands — Auto-Context und `read_recent_messages` bleiben dann leer.
+4. Der Bot reagiert auf **DMs** (jede Nachricht) und **@-Mentions** in Gruppen (Default-Modus, pro Chat unter `/rooms` aenderbar).
+
+**Besonderheiten gegenueber Matrix/Discord:**
+
+- Die Telegram Bot-API hat **keine History-Endpoints**. MiniAssistant fuehrt einen eigenen Nachrichten-Cache (`telegram_history.json` im Config-Verzeichnis, letzte ~300 Nachrichten pro Chat, restart-fest). `read_recent_messages`, `search_chat_history` und der Gruppen-Auto-Context sehen nur Nachrichten, die der Bot **live empfangen** hat.
+- Telegram-Bots koennen ihre Chats **nicht auflisten** — ein Chat erscheint unter `/rooms` erst, nachdem der Bot dort eine Nachricht gesehen hat (Registry `telegram_chats.json`).
+- Chat-IDs sind numerisch, Gruppen negativ (z.B. `-1001234567890`). Bei privaten Chats gilt User-ID = Chat-ID.
+- Nachrichten-Limit **4096 Zeichen**; laengere Antworten werden automatisch gesplittet.
+- **Gruppen-Trust:** Wird der Bot von einem freigeschalteten User in eine Gruppe geholt, sind alle Gruppenmitglieder vertraut (Inviter wird beim Hinzufuegen erfasst und in `telegram_inviters.json` persistiert). Bei Bestandsgruppen: Bot entfernen und von einem authed User neu hinzufuegen.
+- **Sprachnachrichten** funktionieren wie bei Discord: Voice → STT → Agent → TTS-Antwort (bei konfiguriertem `voice:`-Block).
+- Group-Mode-Einstellungen liegen unter `chat_clients.telegram.chat_settings.<chat_id>`, Antwort-Modi unter `chat_clients.telegram.chat_modes` — gleiche Felder wie bei Matrix/Discord, konfigurierbar ueber `/rooms`.
+
+### Gruppenraeume: room_modes & room_settings (Matrix) / channel_modes & channel_settings (Discord) / chat_modes & chat_settings (Telegram)
+
+Am einfachsten ueber die **Web-UI unter `/rooms`** konfigurierbar (Zahnrad-Button pro Raum) — die Keys landen in der Config unter `chat_clients.matrix.room_settings.<room_id>`, `chat_clients.discord.channel_settings.<channel_id>` bzw. `chat_clients.telegram.chat_settings.<chat_id>`.
 
 **Antwort-Modus** (`room_modes` / `channel_modes`): `always` | `mention` | `off` pro Raum. Default: `always` in DMs, `mention` in Gruppen. Bei `always` in Gruppen werden **Quote-Replies auf Nachrichten anderer User ignoriert** (Mensch-zu-Mensch), ausser der Bot ist erwaehnt oder die zitierte Nachricht stammt vom Bot. Raum-Betritte/-Austritte triggern den Bot nie.
 
@@ -544,13 +579,13 @@ Am einfachsten ueber die **Web-UI unter `/rooms`** konfigurierbar (Zahnrad-Butto
 | `search_chat_history_max` | 10–500 | 200 | Scan-Limit fuer `search_chat_history`. |
 | `model_switch` / `models_allow` / `model` | — | aus | `/model`-Wechsel im Raum erlauben + Allowlist + Raum-Modell. |
 
-### Auth-Flow (Matrix + Discord)
+### Auth-Flow (Matrix + Discord + Telegram)
 
-1. **Nutzer schreibt dem Bot** (Matrix-DM, Discord-DM oder @-Mention).
+1. **Nutzer schreibt dem Bot** (Matrix-/Discord-/Telegram-DM oder @-Mention).
 2. **Der Bot** erzeugt einen Code und sendet ihn direkt im Chat: "Dein Auth-Code: **ABC123**. Antworte mit: `/auth ABC123`"
 3. **Nutzer antwortet direkt im Chat** mit `/auth ABC123` (oder nur dem Code).
 4. **Die App** prueft den Code (gueltig 30 Minuten), speichert den Nutzer als autorisiert.
-5. Alternativ in der Web-UI: `/auth matrix ABC123` bzw. `/auth discord ABC123`.
+5. Alternativ in der Web-UI: `/auth matrix ABC123`, `/auth discord ABC123` bzw. `/auth telegram ABC123`.
 
 **Speicherort:** Auth-Daten liegen unter `config/auth/` (`pending_codes.json`, `authorized.json`). Alte Daten aus `config/matrix/` werden automatisch migriert.
 
@@ -749,7 +784,7 @@ email:
 - **server.token** fehlt: wird beim ersten `serve` erzeugt und gespeichert.
 - **providers.\<name\>.models.default** fehlt: Nutzer muss mit `/model MODELLNAME` waehlen.
 - **agent_dir** fehlt: Default-Pfad unter `~/.config/miniassistant/agent`.
-- **chat_clients** fehlt: Kein Matrix/Discord, nur CLI und Web-UI.
+- **chat_clients** fehlt: Kein Matrix/Discord/Telegram, nur CLI und Web-UI.
 - **email** fehlt: Keine E-Mail-Funktion. Konto hinzufügen mit `save_config` — der Assistent führt dich durch die Einrichtung.
 - **raw_proxy** fehlt: Raw Proxy ist deaktiviert (`/raw/v1/` nicht erreichbar).
 
@@ -817,7 +852,7 @@ curl http://localhost:8765/raw/v1/chat/completions \
 - **Token:** Chat, API und Konfiguration erfordern ein Token.
 - **Favicon/Logo:** Die Web-UI zeigt das MiniAssistant-Logo (`miniassistant.png`) als Favicon und im Header.
 - **Chat:** Nachrichten sind durch Trennlinien getrennt. Thinking wird als aufklappbarer Spoiler angezeigt.
-- **Auth:** Freischaltung fuer Matrix/Discord erfolgt direkt im jeweiligen Chat-Client oder per `/auth <platform> <CODE>` in der Web-UI. Es gibt keine separate Auth-Seite mehr.
+- **Auth:** Freischaltung fuer Matrix/Discord/Telegram erfolgt direkt im jeweiligen Chat-Client oder per `/auth <platform> <CODE>` in der Web-UI. Es gibt keine separate Auth-Seite mehr.
 
 ---
 
@@ -1633,6 +1668,27 @@ Pro Request lässt sich Strength zusätzlich via Tool-Parameter `strength` bzw. 
 |-----|-----|---------|-------------|
 | `image_edit_strength` | float | `1.0` | Denoise-Stärke beim Edit (0–1). Global / Provider / `model_options`. |
 | `image_edit_max_edge` | integer | `2048` | Längste Kante der Quelle wird beim Edit darauf gecappt (verhindert OOM bei 4K-Quellen). |
+
+#### Ideogram-4 & Co. — Safety-Filter & JSON-Prompts
+
+Ideogram 4 (open weights) hat einen **in die Modell-Gewichte eingebauten Safety-Filter** — er lässt
+sich nicht abschalten und blockt Plain-Text-Prompts mit hoher False-Positive-Rate: statt des Bildes
+kommt ein graues PNG mit *"Image blocked by safety filter"* (HTTP-technisch ein Erfolg!). Das Modell
+ist auf **strukturierte JSON-Captions** trainiert; JSON-Prompts senken die Block-Rate drastisch.
+
+MiniAssistant behandelt das automatisch für alle Bildmodelle mit `ideogram` im Namen (plus manuell
+gelistete):
+
+1. **JSON-Wrap:** Plain-Text-Prompts werden vor dem Senden ins JSON-Caption-Format gewrappt.
+   Liefert der Orchestrator bereits das volle Schema (siehe `docs/IMAGE_GENERATION.md`), geht es
+   unverändert durch.
+2. **Platzhalter-Erkennung:** Kommt trotzdem das graue Blocked-PNG zurück (Heuristik: nahezu
+   uniformes Graubild), wird es **nicht** in den Chat gesendet, sondern als Fehler an den
+   Orchestrator gemeldet (→ umformulieren oder anderes Modell).
+
+| Key | Typ | Default | Beschreibung |
+|-----|-----|---------|-------------|
+| `image_json_prompt_models` | list | `[]` | Weitere Bildmodelle, die JSON-Wrap + Platzhalter-Check bekommen. Modelle mit `ideogram` im Namen sind immer aktiv. Auch im Form-Editor unter *Tuning*. |
 
 ### Bekannte Vision-Modelle
 

@@ -138,8 +138,9 @@ def _palace_and_collection(project_dir: str | None = None):
     import os as _os
     _os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
     import chromadb
+    from miniassistant.memory import _chroma_settings
     palace_path = _mempalace_palace_path(project_dir)
-    client = chromadb.PersistentClient(path=palace_path)
+    client = chromadb.PersistentClient(path=palace_path, settings=_chroma_settings())
     col = client.get_or_create_collection(DOCS_COLLECTION, metadata={"hnsw:space": "cosine"})
     if (col.metadata or {}).get("hnsw:space") != "cosine":
         # legacy collection created with default l2 space → rebuild with cosine

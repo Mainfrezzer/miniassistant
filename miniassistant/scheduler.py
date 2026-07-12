@@ -318,7 +318,7 @@ def add_scheduled_job(
     Fuegt einen geplanten Job hinzu.
     - command: Shell-Befehl (optional)
     - prompt: Bot-Prompt – wird ausgefuehrt und Antwort an client gesendet (optional)
-    - client: 'matrix', 'discord' oder None (alle)
+    - client: 'matrix', 'discord', 'telegram' oder None (alle)
     - when: Cron (5 Felder) oder 'in N minutes' / 'in 1 hour'
     - once: True = nach erster Ausfuehrung loeschen (auch bei Cron)
     - model: optionaler Modellname/Alias fuer den Prompt (Default: aktuelles Default-Modell)

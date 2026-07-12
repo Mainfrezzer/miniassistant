@@ -245,12 +245,13 @@ async def _favicon():
 
 _matrix_bot_task: asyncio.Task | None = None
 _discord_bot_task: asyncio.Task | None = None
+_telegram_bot_task: asyncio.Task | None = None
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     """Bei server.debug: Startup in debug/serve.log schreiben. Chat-Bots starten falls konfiguriert."""
-    global _matrix_bot_task, _discord_bot_task, _session_cleanup_task, _chat_executor, _slot_cache_cleanup_task
+    global _matrix_bot_task, _discord_bot_task, _telegram_bot_task, _session_cleanup_task, _chat_executor, _slot_cache_cleanup_task
     _session_cleanup_task = asyncio.create_task(_cleanup_expired_sessions())
     _slot_cache_cleanup_task = asyncio.create_task(_slot_cache_cleanup_loop())
     _chat_executor = ThreadPoolExecutor(max_workers=_CHAT_EXECUTOR_MAX_WORKERS, thread_name_prefix="chat")
@@ -300,6 +301,16 @@ async def _startup() -> None:
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).warning("Discord-Bot konnte nicht gestartet werden: %s", e)
+        # Telegram-Bot
+        tc = cc.get("telegram")
+        if tc:
+            if tc.get("enabled", True) and tc.get("bot_token"):
+                try:
+                    from miniassistant.telegram_bot import run_telegram_bot
+                    _telegram_bot_task = asyncio.create_task(run_telegram_bot(config))
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning("Telegram-Bot konnte nicht gestartet werden: %s", e)
     except Exception:
         pass
 
@@ -348,7 +359,7 @@ async def _slot_cache_cleanup_loop() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     """Chat-Executor cleanup und Bot-Tasks abbrechen."""
-    global _chat_executor, _matrix_bot_task, _discord_bot_task, _session_cleanup_task, _slot_cache_cleanup_task
+    global _chat_executor, _matrix_bot_task, _discord_bot_task, _telegram_bot_task, _session_cleanup_task, _slot_cache_cleanup_task
     if _chat_executor:
         _chat_executor.shutdown(wait=False)
     if _slot_cache_cleanup_task:
@@ -356,7 +367,7 @@ async def _shutdown() -> None:
         _chat_executor = None
     if _session_cleanup_task and not _session_cleanup_task.done():
         _session_cleanup_task.cancel()
-    for task in (_matrix_bot_task, _discord_bot_task):
+    for task in (_matrix_bot_task, _discord_bot_task, _telegram_bot_task):
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -365,6 +376,7 @@ async def _shutdown() -> None:
                 pass
     _matrix_bot_task = None
     _discord_bot_task = None
+    _telegram_bot_task = None
 
 
 # Body-size limits per route prefix (bytes). First match wins; default applies otherwise.
@@ -635,7 +647,7 @@ async def index(request: Request):
         wh_cfg = cfg.get("webhooks") or {}
         wh_link = ('<li><a href="/webhooks' + tq + '">Webhooks</a></li>') if (isinstance(wh_cfg, dict) and wh_cfg.get("enabled")) else ""
         cc = cfg.get("chat_clients") or {}
-        rooms_visible = bool((cc.get("matrix") or {}).get("enabled") or (cc.get("discord") or {}).get("enabled"))
+        rooms_visible = bool((cc.get("matrix") or {}).get("enabled") or (cc.get("discord") or {}).get("enabled") or (cc.get("telegram") or {}).get("enabled"))
         rooms_link = ('<li><a href="/rooms' + tq + '">Räume &amp; Channels</a></li>') if rooms_visible else ""
         config_links = '<li><a href="/config' + tq + '">Konfiguration</a></li><li><a href="/nutzung' + tq + '">Nutzung</a></li><li><a href="/schedules' + tq + '">Geplante Jobs</a></li>' + wh_link + rooms_link + '<li><a href="/agent' + tq + '">Vorgaben &amp; Dateien</a></li><li><a href="/workspace' + tq + '">Workspace Explorer</a></li><li><a href="/logs' + tq + '">Logs</a></li>'
     logout_btn = '<button type="button" class="btn btn-outline" id="logout-btn" style="margin-left:0.5em;">Logout</button>' if is_authed else ""
@@ -999,6 +1011,13 @@ async def config_form_page(request: Request):
         {{ n:"token", t:"password", l:"Access-Token", secretFlag:"_token_set", revealPath:"chat_clients.matrix.token" }},
         {{ n:"device_id", t:"text", l:"Device-ID (optional)" }},
         {{ n:"encrypted_rooms", t:"bool", l:"E2EE-Räume zulassen" }},
+    ]}},
+
+    {{ id: "telegram", title: "Telegram-Bot", path: "chat_clients.telegram",
+       desc:"Bot via @BotFather erstellen. Per-Chat-Modi (always/mention/off) werden auf der Seite /rooms verwaltet. Für Gruppen-Auto-Context: Privacy-Mode in BotFather deaktivieren (/setprivacy → Disable).",
+       fields: [
+        {{ n:"enabled", t:"bool", l:"Aktiv" }},
+        {{ n:"bot_token", t:"password", l:"Bot-Token", secretFlag:"_bot_token_set", revealPath:"chat_clients.telegram.bot_token" }},
     ]}},
 
     {{ id: "discord", title: "Discord-Bot", path: "chat_clients.discord",
@@ -1637,6 +1656,7 @@ async def schedules_page(request: Request):
                 f' data-model="{_html.escape(j.get("model") or "", quote=True)}"'
                 f' data-room="{_html.escape(j.get("room_id") or "", quote=True)}"'
                 f' data-channel="{_html.escape(j.get("channel_id") or "", quote=True)}"'
+                f' data-client="{_html.escape(j.get("client") or "", quote=True)}"'
                 f' title="Bearbeiten">&#9998;</button>'
             ) if (j.get("prompt") or trigger == "cron") and not j.get("watch") else ""
             rows += (
@@ -1751,9 +1771,10 @@ async def schedules_page(request: Request):
         // Preselect target dropdown based on stored room/channel
         var roomVal = this.getAttribute("data-room") || "";
         var chanVal = this.getAttribute("data-channel") || "";
+        var clientVal = this.getAttribute("data-client") || "";
         var tgtSel = document.getElementById("editTargetSelect");
         if (roomVal) tgtSel.value = "matrix:" + roomVal;
-        else if (chanVal) tgtSel.value = "discord:" + chanVal;
+        else if (chanVal) tgtSel.value = (clientVal === "telegram" ? "telegram:" : "discord:") + chanVal;
         else tgtSel.value = "";
         document.getElementById("editModal").classList.add("open");
         document.getElementById("editPromptText").focus();
@@ -1780,6 +1801,8 @@ async def schedules_page(request: Request):
         payload.room_id = tgt.substring(7); payload.channel_id = null; payload.client = "matrix";
       }} else if (tgt.indexOf("discord:") === 0) {{
         payload.channel_id = tgt.substring(8); payload.room_id = null; payload.client = "discord";
+      }} else if (tgt.indexOf("telegram:") === 0) {{
+        payload.channel_id = tgt.substring(9); payload.room_id = null; payload.client = "telegram";
       }}
       fetch("/api/schedule/" + encodeURIComponent(_editJobId) + (token ? "?token=" + encodeURIComponent(token) : ""), {{
         method: "PATCH",
@@ -2476,6 +2499,12 @@ async def api_config_save(request: Request):
                     orig_dc = ((orig_data.get("chat_clients") or {}).get("discord") or {}).get("bot_token")
                     if orig_dc:
                         content = content.replace(str(new_dc), orig_dc)
+                # chat_clients.telegram.bot_token
+                new_tg = ((new_data.get("chat_clients") or {}).get("telegram") or {}).get("bot_token", "")
+                if new_tg and "****" in str(new_tg):
+                    orig_tg = ((orig_data.get("chat_clients") or {}).get("telegram") or {}).get("bot_token")
+                    if orig_tg:
+                        content = content.replace(str(new_tg), orig_tg)
                 # github_token (top-level)
                 new_gh = (new_data.get("github_token") or "")
                 if new_gh and "****" in str(new_gh):
@@ -2558,6 +2587,10 @@ def _mask_config_for_form(cfg: dict[str, Any]) -> dict[str, Any]:
         if isinstance(dc, dict):
             dc["_bot_token_set"] = _config_has_value(dc.get("bot_token"))
             dc["bot_token"] = ""
+        tg = cc.get("telegram")
+        if isinstance(tg, dict):
+            tg["_bot_token_set"] = _config_has_value(tg.get("bot_token"))
+            tg["bot_token"] = ""
     # providers.*.api_key (read-only display, aber Klartext nie ausliefern)
     provs = out.get("providers") or {}
     if isinstance(provs, dict):
@@ -2614,6 +2647,7 @@ def _restore_config_secrets(new_cfg: dict[str, Any], original: dict[str, Any]) -
         ["raw_proxy", "token"],
         ["chat_clients", "matrix", "token"],
         ["chat_clients", "discord", "bot_token"],
+        ["chat_clients", "telegram", "bot_token"],
     ):
         _restore_at(new_cfg, original, path)
     # providers.*.api_key (auch wenn UI sie nicht editiert: defensiv restaurieren)
@@ -2661,7 +2695,8 @@ async def api_config_reveal(request: Request):
     parts = path.split(".")
     allowed = False
     if path in ("server.token", "github_token", "raw_proxy.token",
-                "chat_clients.matrix.token", "chat_clients.discord.bot_token"):
+                "chat_clients.matrix.token", "chat_clients.discord.bot_token",
+                "chat_clients.telegram.bot_token"):
         allowed = True
     elif len(parts) == 3 and parts[0] == "providers" and parts[2] == "api_key":
         allowed = True
@@ -2775,9 +2810,9 @@ async def api_generate_title(request: Request):
 
 @app.post("/api/auth/{platform}")
 async def api_auth_platform(request: Request, platform: str):
-    """Auth: Code einlösen und Nutzer freischalten. Plattform: matrix, discord. Erfordert gültiges Token."""
+    """Auth: Code einlösen und Nutzer freischalten. Plattform: matrix, discord, telegram. Erfordert gültiges Token."""
     _require_token(request)
-    if platform not in ("matrix", "discord"):
+    if platform not in ("matrix", "discord", "telegram"):
         raise HTTPException(status_code=400, detail=f"Unbekannte Plattform: {platform}")
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     if not body:
@@ -2796,7 +2831,7 @@ async def api_auth_platform(request: Request, platform: str):
         if result:
             plat, uid = result
             return JSONResponse({"ok": True, "platform": plat, "user_id": uid})
-        return JSONResponse({"ok": False, "detail": "Code nicht gefunden (bereits eingelöst oder abgelaufen?). Im Matrix-/Discord-Chat einen neuen Code anfordern."}, status_code=400)
+        return JSONResponse({"ok": False, "detail": "Code nicht gefunden (bereits eingelöst oder abgelaufen?). Im Matrix-/Discord-/Telegram-Chat einen neuen Code anfordern."}, status_code=400)
     except Exception as e:
         return JSONResponse({"ok": False, "detail": str(e)}, status_code=400)
 
@@ -2893,9 +2928,9 @@ async def api_notify(request: Request):
     message = (body.get("message") or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="message required")
-    client = body.get("client")  # None = alle, "matrix", "discord"
-    if client and client not in ("matrix", "discord"):
-        raise HTTPException(status_code=400, detail="client muss 'matrix', 'discord' oder leer sein")
+    client = body.get("client")  # None = alle, "matrix", "discord", "telegram"
+    if client and client not in ("matrix", "discord", "telegram"):
+        raise HTTPException(status_code=400, detail="client muss 'matrix', 'discord', 'telegram' oder leer sein")
     from miniassistant.notify import send_notification
     loop = asyncio.get_event_loop()
     results = await loop.run_in_executor(_chat_executor, lambda: send_notification(message, client=client))
@@ -3714,6 +3749,14 @@ async def api_logs_list(request: Request):
                         guild = c.get("guild") or ""
                         label = f"{c['name']} ({guild})" if guild else c["name"]
                         stem_to_name[sub] = (label, "discord")
+            except Exception:
+                pass
+            try:
+                from miniassistant.telegram_bot import list_chats as _ltc
+                for c in _ltc() or []:
+                    sub = sanitize_workspace_subdir(c.get("id") or "")
+                    if sub and c.get("name"):
+                        stem_to_name[sub] = (str(c["name"]), "telegram")
             except Exception:
                 pass
             for gf in sorted(groups_dir.iterdir()):
@@ -6732,6 +6775,8 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
         body.room_id = tgt.substring(7); body.client = "matrix";
       }} else if (tgt.indexOf("discord:") === 0) {{
         body.channel_id = tgt.substring(8); body.client = "discord";
+      }} else if (tgt.indexOf("telegram:") === 0) {{
+        body.channel_id = tgt.substring(9); body.client = "telegram";
       }} else {{
         body.client = null;
       }}
@@ -6766,9 +6811,10 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
         document.getElementById("editPrompt").value = this.getAttribute("data-prompt") || "";
         var room = this.getAttribute("data-room") || "";
         var channel = this.getAttribute("data-channel") || "";
+        var wClient = this.getAttribute("data-client") || "";
         var tgtSel = document.getElementById("editTarget");
         if (room) tgtSel.value = "matrix:" + room;
-        else if (channel) tgtSel.value = "discord:" + channel;
+        else if (channel) tgtSel.value = (wClient === "telegram" ? "telegram:" : "discord:") + channel;
         else tgtSel.value = "";
         document.getElementById("editModel").value = this.getAttribute("data-model") || "";
         document.getElementById("editSilent").checked = this.getAttribute("data-silent") === "1";
@@ -6788,6 +6834,8 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
         body.room_id = tgt.substring(7); body.channel_id = null; body.client = "matrix";
       }} else if (tgt.indexOf("discord:") === 0) {{
         body.channel_id = tgt.substring(8); body.room_id = null; body.client = "discord";
+      }} else if (tgt.indexOf("telegram:") === 0) {{
+        body.channel_id = tgt.substring(9); body.room_id = null; body.client = "telegram";
       }} else {{
         body.room_id = null; body.channel_id = null; body.client = null;
       }}
@@ -6876,9 +6924,9 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
 # Rooms / Channels page (Matrix + Discord per-room response modes)
 # ---------------------------------------------------------------------------
 
-def _build_target_options(config: dict, *, selected_matrix: str = "", selected_discord: str = "") -> str:
+def _build_target_options(config: dict, *, selected_matrix: str = "", selected_discord: str = "", selected_telegram: str = "") -> str:
     """Build <option> list HTML for the room/channel select used in /schedules and /webhooks.
-    Value format: '' (none), 'matrix:<room_id>' or 'discord:<channel_id>'.
+    Value format: '' (none), 'matrix:<room_id>', 'discord:<channel_id>' or 'telegram:<chat_id>'.
     Only includes clients that are enabled. Adds 'kein expliziter Raum' as default option."""
     data = _collect_rooms_and_channels(config)
     parts = ['<option value="">— kein expliziter Raum (an alle authed User) —</option>']
@@ -6909,6 +6957,19 @@ def _build_target_options(config: dict, *, selected_matrix: str = "", selected_d
             parts.append('</optgroup>')
         else:
             parts.append('<optgroup label="Discord"><option disabled>(Bot in keinem Channel oder noch nicht verbunden)</option></optgroup>')
+    if data["telegram_enabled"]:
+        if data["telegram_chats"]:
+            parts.append('<optgroup label="Telegram">')
+            for c in data["telegram_chats"]:
+                if c.get("offline"):
+                    continue
+                cid = c["id"]
+                sel = " selected" if cid == selected_telegram else ""
+                label = f'{c["name"]} [{cid}]'
+                parts.append(f'<option value="telegram:{_escape(cid)}"{sel}>{_escape(label)}</option>')
+            parts.append('</optgroup>')
+        else:
+            parts.append('<optgroup label="Telegram"><option disabled>(Bot hat noch keinen Chat gesehen)</option></optgroup>')
     return "\n".join(parts)
 
 
@@ -6925,6 +6986,9 @@ def _resolve_target_name(config: dict, *, room_id: str = "", channel_id: str = "
         for c in data["discord_channels"]:
             if c["id"] == channel_id:
                 return f'#{c["name"]}'
+        for c in data["telegram_chats"]:
+            if c["id"] == channel_id:
+                return c["name"]
     return ""
 
 
@@ -6932,10 +6996,13 @@ def _collect_rooms_and_channels(config: dict) -> dict:
     """Pull joined Matrix rooms + Discord channels, merge with saved modes from config."""
     matrix_cfg = (config.get("chat_clients") or {}).get("matrix") or {}
     discord_cfg = (config.get("chat_clients") or {}).get("discord") or {}
+    telegram_cfg = (config.get("chat_clients") or {}).get("telegram") or {}
     room_modes = matrix_cfg.get("room_modes") or {}
     channel_modes = discord_cfg.get("channel_modes") or {}
+    chat_modes = telegram_cfg.get("chat_modes") or {}
     room_settings = matrix_cfg.get("room_settings") or {}
     channel_settings = discord_cfg.get("channel_settings") or {}
+    chat_settings = telegram_cfg.get("chat_settings") or {}
 
     def _settings_for(rs: dict, rid: str, members: int) -> dict:
         s = rs.get(rid) or {}
@@ -6963,6 +7030,7 @@ def _collect_rooms_and_channels(config: dict) -> dict:
 
     matrix_rooms: list[dict] = []
     discord_channels: list[dict] = []
+    telegram_chats: list[dict] = []
     try:
         from miniassistant.matrix_bot import list_joined_rooms
         for r in list_joined_rooms():
@@ -6984,6 +7052,17 @@ def _collect_rooms_and_channels(config: dict) -> dict:
                                      "settings": _settings_for(channel_settings, c["id"], members_proxy)})
     except Exception as e:
         logger.warning("list_channels failed: %s", e)
+    try:
+        from miniassistant.telegram_bot import list_chats
+        for c in list_chats():
+            mode = (chat_modes.get(c["id"]) or "").strip().lower()
+            if mode not in ("always", "mention", "off"):
+                mode = "always" if c.get("kind") == "dm" else "mention"
+            members_proxy = 2 if c.get("kind") == "dm" else 3
+            telegram_chats.append({**c, "mode": mode, "is_default": not chat_modes.get(c["id"]),
+                                   "settings": _settings_for(chat_settings, c["id"], members_proxy)})
+    except Exception as e:
+        logger.warning("telegram list_chats failed: %s", e)
 
     seen_matrix = {r["id"] for r in matrix_rooms}
     for rid, mode in room_modes.items():
@@ -6997,11 +7076,19 @@ def _collect_rooms_and_channels(config: dict) -> dict:
             discord_channels.append({"id": cid, "name": "(nicht verbunden)", "guild": "", "kind": "text",
                                      "mode": mode, "is_default": False, "offline": True,
                                      "settings": _settings_for(channel_settings, cid, 3)})
+    seen_telegram = {c["id"] for c in telegram_chats}
+    for cid, mode in chat_modes.items():
+        if cid not in seen_telegram:
+            telegram_chats.append({"id": cid, "name": "(nicht verbunden)", "kind": "group", "type": "",
+                                   "mode": mode, "is_default": False, "offline": True,
+                                   "settings": _settings_for(chat_settings, cid, 3)})
     return {
         "matrix_enabled": bool(matrix_cfg.get("enabled")),
         "discord_enabled": bool(discord_cfg.get("enabled")),
+        "telegram_enabled": bool(telegram_cfg.get("enabled")),
         "matrix_rooms": matrix_rooms,
         "discord_channels": discord_channels,
+        "telegram_chats": telegram_chats,
     }
 
 
@@ -7052,7 +7139,26 @@ async def api_rooms_leave(request: Request):
             raise HTTPException(status_code=500, detail=f"discord_bot import failed: {e}")
         ok, msg = await loop.run_in_executor(_chat_executor, leave_guild, target_id)
         return JSONResponse({"ok": ok, "message": msg or ("ok" if ok else "leave failed")})
-    raise HTTPException(status_code=400, detail="kind must be 'matrix' or 'discord_guild'")
+    if kind == "telegram":
+        try:
+            from miniassistant.telegram_bot import leave_chat
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"telegram_bot import failed: {e}")
+        ok, msg = await loop.run_in_executor(_chat_executor, leave_chat, target_id)
+        if ok:
+            try:
+                config = load_config()
+                section = ((config.get("chat_clients") or {}).get("telegram") or {})
+                modes = section.get("chat_modes") or {}
+                if target_id in modes:
+                    modes.pop(target_id, None)
+                    if not modes:
+                        section.pop("chat_modes", None)
+                    save_config(config)
+            except Exception as e:
+                logger.warning("telegram leave: mode cleanup failed: %s", e)
+        return JSONResponse({"ok": ok, "message": msg or ("ok" if ok else "leave failed")})
+    raise HTTPException(status_code=400, detail="kind must be 'matrix', 'discord_guild' or 'telegram'")
 
 
 @app.patch("/api/rooms")
@@ -7064,7 +7170,7 @@ async def api_rooms_patch(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     valid = {"always", "mention", "off"}
-    counts = {"m": 0, "d": 0}
+    counts = {"m": 0, "d": 0, "t": 0}
 
     def _apply_one(cc: dict, client_key: str, modes_key: str, payload_key: str) -> int:
         section = cc.get(client_key)
@@ -7099,10 +7205,11 @@ async def api_rooms_patch(request: Request):
         cc = config.setdefault("chat_clients", {})
         counts["m"] = _apply_one(cc, "matrix", "room_modes", "matrix")
         counts["d"] = _apply_one(cc, "discord", "channel_modes", "discord")
+        counts["t"] = _apply_one(cc, "telegram", "chat_modes", "telegram")
 
     from miniassistant.config import save_config_atomic
     save_config_atomic(_updater)
-    return JSONResponse({"ok": True, "matrix_changes": counts["m"], "discord_changes": counts["d"]})
+    return JSONResponse({"ok": True, "matrix_changes": counts["m"], "discord_changes": counts["d"], "telegram_changes": counts["t"]})
 
 
 @app.patch("/api/rooms/settings")
@@ -7193,7 +7300,7 @@ async def api_rooms_settings_patch(request: Request):
             out["model"] = mdl.strip()
         return out
 
-    counts = {"m": 0, "d": 0}
+    counts = {"m": 0, "d": 0, "t": 0}
 
     def _apply_one(cc: dict, client_key: str, store_key: str, payload_key: str) -> int:
         section = cc.get(client_key)
@@ -7229,10 +7336,11 @@ async def api_rooms_settings_patch(request: Request):
         cc = config.setdefault("chat_clients", {})
         counts["m"] = _apply_one(cc, "matrix", "room_settings", "matrix")
         counts["d"] = _apply_one(cc, "discord", "channel_settings", "discord")
+        counts["t"] = _apply_one(cc, "telegram", "chat_settings", "telegram")
 
     from miniassistant.config import save_config_atomic
     save_config_atomic(_updater)
-    return JSONResponse({"ok": True, "matrix_changes": counts["m"], "discord_changes": counts["d"]})
+    return JSONResponse({"ok": True, "matrix_changes": counts["m"], "discord_changes": counts["d"], "telegram_changes": counts["t"]})
 
 
 @app.get("/rooms", response_class=HTMLResponse)
@@ -7455,6 +7563,45 @@ async def rooms_page(request: Request):
                     f'<td><button class="btn-leave" data-kind="discord_guild" data-id="{_escape(gid)}" data-name="{_escape(gname)}" title="Bot aus diesem Server entfernen">Server verlassen</button></td></tr>'
                 )
 
+    telegram_rows = ""
+    if not data["telegram_enabled"]:
+        telegram_rows = '<tr><td colspan="5" style="text-align:center;color:var(--muted);font-style:italic;">Telegram-Client nicht aktiviert.</td></tr>'
+    elif not data["telegram_chats"]:
+        telegram_rows = '<tr><td colspan="5" style="text-align:center;color:var(--muted);font-style:italic;">Keine Chats bekannt — der Bot registriert Chats, sobald er dort eine Nachricht sieht.</td></tr>'
+    else:
+        for c in data["telegram_chats"]:
+            offline = '<span style="color:var(--muted);font-size:0.8em;"> (nicht mehr gesehen)</span>' if c.get("offline") else ""
+            kind = ' <span title="Direct Message" style="font-size:0.78em;color:var(--muted);">DM</span>' if c.get("kind") == "dm" else ""
+            trust_badge = ""
+            if c.get("kind") != "dm":
+                inv = c.get("inviter") or ""
+                if inv:
+                    try:
+                        from miniassistant.chat_auth import is_authorized as _tg_isauth
+                        inv_authed = bool(_tg_isauth("telegram", inv, config.get("_config_dir")))
+                    except Exception:
+                        inv_authed = False
+                    if inv_authed:
+                        trust_badge = f' <span title="Bot hinzugefügt von User-ID {_escape(inv)} (authed) — alle Chat-Mitglieder vertraut" style="color:#2d8a4e;font-size:0.78em;">✅ vertraut</span>'
+                    else:
+                        trust_badge = f' <span title="Inviter User-ID {_escape(inv)} ist NICHT authed — jeder User braucht eigenes Auth" style="color:#c87000;font-size:0.78em;">⚠ Inviter nicht authed</span>'
+                else:
+                    trust_badge = ' <span title="Kein Inviter bekannt (Bot war schon vor dem Tracking im Chat) — Bot entfernen und von einem authed User neu hinzufügen für Chat-Trust" style="color:var(--muted);font-size:0.78em;">? Inviter unbekannt</span>'
+            tg_type = f'<span style="color:var(--muted);font-size:0.85em;">{_escape(c.get("type") or "")}</span>{trust_badge}'
+            default_hint = ' <span style="color:var(--muted);font-size:0.78em;" title="kein expliziter Mode — automatischer Default">(default)</span>' if c.get("is_default") else ""
+            is_dm_t = c.get("kind") == "dm"
+            adv_btn = "" if is_dm_t else f'<button class="btn-adv" data-target-kind="telegram" data-target-id="{_escape(c["id"])}" title="Group-Mode-Einstellungen für diesen Chat">⚙</button>'
+            leave_btn = "" if is_dm_t or c.get("offline") else f'<button class="btn-leave" data-kind="telegram" data-id="{_escape(c["id"])}" data-name="{_escape(c["name"])}" title="Bot aus diesem Chat entfernen">Verlassen</button>'
+            telegram_rows += (
+                f'<tr><td><strong>{_escape(c["name"])}</strong>{kind}{offline}</td>'
+                f'<td><code style="font-size:0.78em;">{_escape(c["id"])}</code></td>'
+                f'<td>{tg_type}</td>'
+                f'<td>{_mode_select("telegram", c["id"], c["mode"])}{default_hint}</td>'
+                f'<td>{adv_btn} {leave_btn}</td></tr>'
+            )
+            if not is_dm_t:
+                telegram_rows += _settings_row("telegram", c["id"], c.get("settings") or {}, colspan=5)
+
     html = f"""
     <!DOCTYPE html><html><head><meta charset="utf-8"><title>Räume – MiniAssistant</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7532,6 +7679,17 @@ async def rooms_page(request: Request):
         </div>
       </div>
 
+      <h2 class="sect">Telegram</h2>
+      <div class="card">
+        <table>
+          <thead><tr><th>Chat</th><th>Chat ID</th><th>Typ</th><th>Antwort-Mode</th><th></th></tr></thead>
+          <tbody>{telegram_rows}</tbody>
+        </table>
+        <div style="margin-top:0.6em;padding:0.5em 0.7em;background:var(--bg);border-radius:4px;font-size:0.82em;color:var(--muted);">
+          ℹ️ Telegram-Bots können Chats nicht auflisten — ein Chat erscheint hier, sobald der Bot dort eine Nachricht gesehen hat. Für Gruppen-Auto-Context muss der Privacy-Mode via BotFather deaktiviert sein (<code>/setprivacy → Disable</code>), sonst sieht der Bot nur Mentions.
+        </div>
+      </div>
+
       <div style="margin-top:1.2em;display:flex;gap:0.6em;align-items:center;flex-wrap:wrap;">
         <a href="/{tq}" class="btn btn-outline">Startseite</a>
         <button id="saveBtn" class="btn btn-primary" disabled>Speichern</button>
@@ -7580,11 +7738,11 @@ async def rooms_page(request: Request):
       setTimeout(function(){{ t.style.opacity = "0"; setTimeout(function(){{ if (t.parentNode) t.remove(); }}, 300); }}, kind === "error" ? 5000 : 2500);
     }}
     // Dirty-State: zwei Buckets (modes + settings). Speichern-Button flusht beide.
-    var _pending = {{matrix: {{}}, discord: {{}}}};
-    var _settingsPending = {{matrix: {{}}, discord: {{}}}};  // referenced in _flushSettings/_queueSettingsFromRow below
+    var _pending = {{matrix: {{}}, discord: {{}}, telegram: {{}}}};
+    var _settingsPending = {{matrix: {{}}, discord: {{}}, telegram: {{}}}};  // referenced in _flushSettings/_queueSettingsFromRow below
     function _dirtyCount() {{
-      return Object.keys(_pending.matrix).length + Object.keys(_pending.discord).length
-           + Object.keys(_settingsPending.matrix).length + Object.keys(_settingsPending.discord).length;
+      return Object.keys(_pending.matrix).length + Object.keys(_pending.discord).length + Object.keys(_pending.telegram).length
+           + Object.keys(_settingsPending.matrix).length + Object.keys(_settingsPending.discord).length + Object.keys(_settingsPending.telegram).length;
     }}
     function _updateDirtyUi() {{
       var n = _dirtyCount();
@@ -7599,13 +7757,14 @@ async def rooms_page(request: Request):
       var body = {{}};
       if (Object.keys(_pending.matrix).length) body.matrix = _pending.matrix;
       if (Object.keys(_pending.discord).length) body.discord = _pending.discord;
-      if (!body.matrix && !body.discord) return Promise.resolve({{ok: true, skipped: true}});
+      if (Object.keys(_pending.telegram).length) body.telegram = _pending.telegram;
+      if (!body.matrix && !body.discord && !body.telegram) return Promise.resolve({{ok: true, skipped: true}});
       return fetch("/api/rooms" + tq(), {{
         method: "PATCH",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify(body),
       }}).then(function(r){{
-        if (r.ok) {{ _pending = {{matrix: {{}}, discord: {{}}}}; return {{ok: true}}; }}
+        if (r.ok) {{ _pending = {{matrix: {{}}, discord: {{}}, telegram: {{}}}}; return {{ok: true}}; }}
         return r.json().then(function(d){{ throw new Error(d.detail || "Fehler beim Speichern (modes)"); }});
       }});
     }}
@@ -7695,13 +7854,14 @@ async def rooms_page(request: Request):
       var body = {{}};
       if (Object.keys(_settingsPending.matrix).length) body.matrix = _settingsPending.matrix;
       if (Object.keys(_settingsPending.discord).length) body.discord = _settingsPending.discord;
-      if (!body.matrix && !body.discord) return Promise.resolve({{ok: true, skipped: true}});
+      if (Object.keys(_settingsPending.telegram).length) body.telegram = _settingsPending.telegram;
+      if (!body.matrix && !body.discord && !body.telegram) return Promise.resolve({{ok: true, skipped: true}});
       return fetch("/api/rooms/settings" + tq(), {{
         method: "PATCH",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify(body),
       }}).then(function(r){{
-        if (r.ok) {{ _settingsPending = {{matrix: {{}}, discord: {{}}}}; return {{ok: true}}; }}
+        if (r.ok) {{ _settingsPending = {{matrix: {{}}, discord: {{}}, telegram: {{}}}}; return {{ok: true}}; }}
         return r.json().then(function(d){{ throw new Error(d.detail || "Fehler beim Speichern (settings)"); }});
       }});
     }}
@@ -7723,10 +7883,12 @@ async def rooms_page(request: Request):
         var id = this.getAttribute("data-id");
         var name = this.getAttribute("data-name") || id;
         console.log("btn-leave click", kind, id, name);
-        var title = kind === "matrix" ? "Matrix-Raum verlassen?" : "Discord-Server verlassen?";
+        var title = kind === "matrix" ? "Matrix-Raum verlassen?" : (kind === "telegram" ? "Telegram-Chat verlassen?" : "Discord-Server verlassen?");
         var body = kind === "matrix"
           ? "Der Bot verlässt den Raum '" + name + "'. Nachrichten werden danach nicht mehr empfangen — Schedules/Webhooks für diesen Raum funktionieren auch nicht mehr (kein Mitglied → keine Sendeerlaubnis)."
-          : "Der Bot verlässt den ganzen Discord-Server '" + name + "'. ALLE Channels dieses Servers werden für den Bot unerreichbar. Re-Invite nur über Server-Owner mit OAuth-Link.";
+          : (kind === "telegram"
+            ? "Der Bot verlässt den Telegram-Chat '" + name + "'. Re-Invite über einen Chat-Admin nötig."
+            : "Der Bot verlässt den ganzen Discord-Server '" + name + "'. ALLE Channels dieses Servers werden für den Bot unerreichbar. Re-Invite nur über Server-Owner mit OAuth-Link.");
         appConfirm(title, body, {{okLabel: "Verlassen"}}).then(function(ok){{
           console.log("appConfirm result:", ok);
           if (!ok) return;

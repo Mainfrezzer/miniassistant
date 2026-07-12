@@ -19,6 +19,12 @@ from miniassistant.config import load_config, get_config_dir
 
 _log = logging.getLogger("miniassistant.memory")
 
+def _chroma_settings():
+    """ChromaDB defaults to anonymized_telemetry=True (posthog) — hard off, nothing phones home."""
+    from chromadb.config import Settings
+    return Settings(anonymized_telemetry=False)
+
+
 # --- Noise-Filter: Diese Exchanges verschwenden nur Context-Tokens ---
 _NOISE_PATTERNS: list[re.Pattern[str]] = [
     # Auto-generierte Title/Tag-Requests vom System
@@ -347,7 +353,7 @@ def init_mempalace(project_dir: str | None = None) -> str:
             encoding="utf-8",
         )
 
-    client = chromadb.PersistentClient(path=palace_path)
+    client = chromadb.PersistentClient(path=palace_path, settings=_chroma_settings())
     client.get_or_create_collection("mempalace_drawers")
     _log.info("mempalace initialized at %s", palace_path)
 
@@ -415,7 +421,7 @@ def import_existing_memories(
     if not mem_d.exists():
         return {"imported": 0, "skipped_noise": 0, "skipped_existing": 0, "files": 0}
 
-    client = chromadb.PersistentClient(path=palace_path)
+    client = chromadb.PersistentClient(path=palace_path, settings=_chroma_settings())
     col = client.get_or_create_collection("mempalace_drawers")
 
     existing_ids: set[str] = set()
@@ -514,7 +520,7 @@ def _mempalace_store(
         import chromadb
 
         palace_path = _mempalace_palace_path(project_dir)
-        client = chromadb.PersistentClient(path=palace_path)
+        client = chromadb.PersistentClient(path=palace_path, settings=_chroma_settings())
         col = client.get_or_create_collection("mempalace_drawers")
 
         wing = mp_cfg.get("wing", "miniassistant")

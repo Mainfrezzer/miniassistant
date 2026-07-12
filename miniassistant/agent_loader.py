@@ -366,6 +366,8 @@ def _group_tools_section(config: dict[str, Any], chat_ctx: dict[str, Any]) -> st
             id_hint = "`@user:server.tld`"
         elif platform == "discord":
             id_hint = "numeric Discord user ID (string)"
+        elif platform == "telegram":
+            id_hint = "numeric Telegram user ID (string)"
         else:
             id_hint = "platform user ID"
         lines.append(
@@ -455,7 +457,7 @@ def _group_speaker_section(chat_ctx: dict[str, Any]) -> str:
         return ""
     lines = ["## Current speaker (THIS turn only)"]
     lines.append(
-        "If the user replied/quoted an earlier image (Matrix reply-to-image OR Discord reply-feature), that image is "
+        "If the user replied/quoted an earlier image (Matrix/Discord/Telegram reply-feature), that image is "
         "automatically attached to this turn's input — you receive it the same way as a fresh upload, can describe it "
         "(if vision-capable or via `invoke_model(VL, image_path=…)`), or edit it via `invoke_model(<edit-model>, image_path=…)`. "
         "Quoted TEXT appears in the body prefixed with `> ` lines (Matrix) — already visible to you."
@@ -557,7 +559,7 @@ def _persistence_section(config: dict[str, Any]) -> str:
             f"| System config (providers, models, server, scheduler, ...) | `config.yaml` | `save_config` tool | YAML (merged) |\n\n"
             f"**Top-level config keys — each is independent:**\n"
             f"- `providers` / `server` / `scheduler` — AI and server settings\n"
-            f"- `chat_clients.matrix` / `chat_clients.discord` — chat bot connections (Matrix, Discord) — **NOT email**\n"
+            f"- `chat_clients.matrix` / `chat_clients.discord` / `chat_clients.telegram` — chat bot connections — **NOT email**\n"
             f"- `email` — email accounts (IMAP/SMTP) — **completely separate from chat_clients**\n\n"
             f"**Rules:**\n"
             f"- **Only save when the user explicitly asks** — 'merk dir', 'speicher dir', 'remember', 'save', 'notier dir'. "
@@ -659,9 +661,9 @@ def _docs_reference_section(config: dict[str, Any]) -> str:
         f"Directory: `{d}/`\n"
         f"Read only the file you need (`cat \"{d}/FILE\"`). Follow its instructions — do not tell the user to read it.\n"
         + docs_search_hint +
-        "Before configuring Matrix/Discord/Voice: read the matching doc first.\n\n"
+        "Before configuring Matrix/Discord/Telegram/Voice: read the matching doc first.\n\n"
         f"**Setup:** `CONFIG_REFERENCE.md` · `PROVIDERS.md` · `CONTEXT_SIZE.md` · `SEARCH_ENGINES.md`\n"
-        f"**Chat:** `MATRIX.md` · `DISCORD.md` · `EMAIL.md` · `AVATARS.md` · `{_chat_history_doc(config)}`\n"
+        f"**Chat:** `MATRIX.md` · `DISCORD.md` · `TELEGRAM.md` · `EMAIL.md` · `AVATARS.md` · `{_chat_history_doc(config)}`\n"
         f"**Features:** `VOICE.md` (STT/TTS, send_audio rules) · `VISION.md` · `IMAGE_GENERATION.md` · `DOCUMENTS.md` (PDF/DOCX/Text-Anhaenge) · `SCHEDULES.md` · `SUBAGENTS.md` · `DEBATE.md`\n"
         f"**Tools:** `GITHUB.md` (REST API, repo tracking) · `WEB_FETCHING.md` (Playwright) · `API_REFERENCE.md` · `DIRECTIONS.md`\n"
         f"**Guides:** `PLANNING.md` · `PROMPT_ENGINEERING.md` · `TRACKING.md` (calories, expenses, habits)\n\n"
@@ -1261,7 +1263,7 @@ def _tools_section(config: dict[str, Any]) -> str:
         )
     cc = config.get("chat_clients") or {}
     clients = []
-    for k in ("matrix", "discord"):
+    for k in ("matrix", "discord", "telegram"):
         cfg = (cc.get(k) or config.get(k) or {}) or {}
         if not isinstance(cfg, dict):
             cfg = {}
@@ -1371,7 +1373,7 @@ def _vision_section(config: dict[str, Any], current_model: str | None = None) ->
         lines.append(f"  For details on generate vs edit: read `{img_doc}`.")
         lines.append(
             "- **After generating/editing an image:** Use `send_image(image_path='/path/to/image.png', caption='...')` to upload it to the current chat. "
-            "The tool handles Matrix upload (via bot client, E2EE-capable), Discord upload, and Web-UI automatically. No curl needed.\n"
+            "The tool handles Matrix upload (via bot client, E2EE-capable), Discord upload, Telegram upload, and Web-UI automatically. No curl needed.\n"
             "  **After a successful `send_image`: do NOT reply with text.** The user already sees the image — a confirmation message would be redundant. Only reply if the tool fails."
         )
     avatar_file = f"{agent_dir}/avatar.png" if agent_dir else "agent_dir/avatar.png"
@@ -1580,7 +1582,7 @@ def build_system_prompt(
 
     parts = [
         "# Role and context",
-        "You are the assistant of **MiniAssistant**. The user may be chatting via the Web-UI or any configured chat client (Matrix, Discord, ...).",
+        "You are the assistant of **MiniAssistant**. The user may be chatting via the Web-UI or any configured chat client (Matrix, Discord, Telegram, ...).",
         "",
         "## Chat history",
         "Facts from this conversation (IPs, hosts, paths, preferences) stay valid until corrected. Only avoid resuming *unrelated* old topics.",

@@ -203,7 +203,7 @@ def _is_enabled_for_model(config: dict[str, Any], model: str) -> bool:
 def is_enabled_for(config: dict[str, Any], model: str, endpoint: str) -> bool:
     """Endpoint-Toggle + Model-Toggle prüfen.
 
-    endpoint: 'web' (track=true), 'api' (/v1), 'raw' (/raw/v1), 'matrix', 'discord'.
+    endpoint: 'web' (track=true), 'api' (/v1), 'raw' (/raw/v1), 'matrix', 'discord', 'telegram'.
     """
     if not _is_enabled_for_model(config, model):
         return False
@@ -275,6 +275,11 @@ def derive_conv_id(platform: str, **kwargs: Any) -> str | None:
         if not cid or not uid:
             return None
         return f"discord:{cid}:{uid}"
+    if platform == "telegram":
+        cid = kwargs.get("channel_id"); uid = kwargs.get("user_id")
+        if not cid or not uid:
+            return None
+        return f"telegram:{cid}:{uid}"
     return None
 
 

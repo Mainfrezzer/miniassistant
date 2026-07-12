@@ -85,6 +85,8 @@ def get_room_settings(config: dict[str, Any], platform: str, target_id: str | No
         store = sect.get("room_settings") or {}
     elif platform == "discord":
         store = sect.get("channel_settings") or {}
+    elif platform == "telegram":
+        store = sect.get("chat_settings") or {}
     else:
         return {}
     val = store.get(target_id)
@@ -176,6 +178,8 @@ def ensure_default_group_settings(
         store_key = "room_settings"
     elif platform == "discord":
         store_key = "channel_settings"
+    elif platform == "telegram":
+        store_key = "chat_settings"
     else:
         return False
     store = sect.setdefault(store_key, {})

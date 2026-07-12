@@ -483,6 +483,33 @@ def _normalize_discord(discord: Any) -> dict[str, Any] | None:
     return out
 
 
+def _normalize_telegram(telegram: Any) -> dict[str, Any] | None:
+    """Telegram-Config: enabled, bot_token, chat_modes, chat_settings."""
+    if not telegram or not isinstance(telegram, dict):
+        return None
+    t = telegram
+    bot_token = (t.get("bot_token") or "").strip()
+    if not bot_token:
+        return None
+    out = {
+        "enabled": bool(t.get("enabled", True)),
+        "bot_token": bot_token,
+    }
+    cm = t.get("chat_modes")
+    if isinstance(cm, dict) and cm:
+        clean = {str(k): str(v).strip().lower() for k, v in cm.items()
+                 if isinstance(k, str) and str(v).strip().lower() in ("always", "mention", "off")}
+        if clean:
+            out["chat_modes"] = clean
+    # Per-chat group-mode settings: same shape as room_settings für Matrix
+    cs = t.get("chat_settings")
+    if isinstance(cs, dict) and cs:
+        clean_cs = {str(k): v for k, v in cs.items() if isinstance(k, str) and isinstance(v, dict)}
+        if clean_cs:
+            out["chat_settings"] = clean_cs
+    return out
+
+
 def _normalize_email_account(raw: Any) -> dict[str, Any] | None:
     """Ein einzelnes E-Mail-Konto normalisieren."""
     if not raw or not isinstance(raw, dict):
@@ -554,6 +581,7 @@ def _normalize_chat_clients(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "matrix": _normalize_matrix(cc.get("matrix")),
         "discord": _normalize_discord(cc.get("discord")),
+        "telegram": _normalize_telegram(cc.get("telegram")),
     }
 
 

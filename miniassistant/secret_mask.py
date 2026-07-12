@@ -64,6 +64,7 @@ def collect_secrets(config: dict[str, Any]) -> list[str]:
     cc = config.get("chat_clients") or {}
     _add((cc.get("matrix") or {}).get("token"))
     _add((cc.get("discord") or {}).get("bot_token"))
+    _add((cc.get("telegram") or {}).get("bot_token"))
     for acc in ((config.get("email") or {}).get("accounts") or {}).values():
         if isinstance(acc, dict):
             _add(acc.get("password"))

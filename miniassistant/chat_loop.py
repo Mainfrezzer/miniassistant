@@ -2364,7 +2364,7 @@ def _auto_deliver_group_image(config: dict[str, Any], host_path: str, caption: s
     if not _ctx.get("group_mode"):
         return None
     _platform = _ctx.get("platform")
-    if _platform not in ("matrix", "discord"):
+    if _platform not in ("matrix", "discord", "telegram"):
         return None
     with _IMG_DELIVER_LOCK:
         _sent_paths = config.setdefault("_auto_sent_image_paths", set())
@@ -3009,6 +3009,10 @@ def _run_tool(
             watch_room_id = None
             watch_channel_id = chat_ctx["channel_id"]
             watch_client = "discord"
+        elif chat_platform == "telegram" and chat_ctx.get("channel_id"):
+            watch_room_id = None
+            watch_channel_id = chat_ctx["channel_id"]
+            watch_client = "telegram"
         else:
             watch_room_id = None
             watch_channel_id = None
@@ -3074,8 +3078,14 @@ def _run_tool(
                 res = _sch(channel_id, query, max_scan=max_scan)
             except Exception as e:
                 return f"search_chat_history: discord failed: {e}"
+        elif platform == "telegram" and channel_id:
+            try:
+                from miniassistant.telegram_bot import search_chat_history as _sch
+                res = _sch(channel_id, query, max_scan=max_scan)
+            except Exception as e:
+                return f"search_chat_history: telegram failed: {e}"
         else:
-            return "search_chat_history: only available in matrix rooms or discord channels."
+            return "search_chat_history: only available in matrix rooms, discord channels or telegram chats."
         diag = res.get("diagnostic")
         hits = res.get("hits") or []
         if not hits:
@@ -3126,8 +3136,14 @@ def _run_tool(
                 res = _gup(user_id, str(avatar_dir), channel_id=chat_ctx.get("channel_id") or "")
             except Exception as e:
                 return f"get_user_profile: discord failed: {e}"
+        elif platform == "telegram":
+            try:
+                from miniassistant.telegram_bot import get_user_profile as _gup
+                res = _gup(user_id, str(avatar_dir), chat_id=chat_ctx.get("channel_id") or "")
+            except Exception as e:
+                return f"get_user_profile: telegram failed: {e}"
         else:
-            return "get_user_profile: only available in matrix/discord group rooms."
+            return "get_user_profile: only available in matrix/discord/telegram group rooms."
         # Host-Pfad → Sandbox-Sicht
         ap_host = res.get("avatar_path") or ""
         if ap_host:
@@ -3180,8 +3196,14 @@ def _run_tool(
                 msgs = _fr(channel_id, limit=limit, skip_message_id=skip_msg)
             except Exception as e:
                 return f"read_recent_messages: discord fetch failed: {e}"
+        elif platform == "telegram" and channel_id:
+            try:
+                from miniassistant.telegram_bot import fetch_recent_messages as _fr
+                msgs = _fr(channel_id, limit=limit, skip_message_id=skip_msg)
+            except Exception as e:
+                return f"read_recent_messages: telegram fetch failed: {e}"
         else:
-            return "read_recent_messages: only available in matrix rooms or discord channels."
+            return "read_recent_messages: only available in matrix rooms, discord channels or telegram chats."
         if not msgs:
             base = "No previous messages available."
             if diag:
@@ -3399,8 +3421,15 @@ def _run_tool(
                 return "sent" if ok else "send failed (Discord bot not running?)"
             except Exception as e:
                 return f"send failed: {e}"
+        elif platform == "telegram" and channel_id:
+            try:
+                from miniassistant.telegram_bot import send_message_to_chat
+                ok = send_message_to_chat(channel_id, msg)
+                return "sent" if ok else "send failed (Telegram bot not running?)"
+            except Exception as e:
+                return f"send failed: {e}"
         else:
-            return "status_update: no active chat context (only available in Matrix/Discord chats)"
+            return "status_update: no active chat context (only available in Matrix/Discord/Telegram chats)"
     if name == "schedule":
         action = arguments.get("action", "create").lower()
         if action == "list":
@@ -3467,6 +3496,10 @@ def _run_tool(
             sched_room_id = None
             sched_channel_id = chat_ctx["channel_id"]
             sched_client = client or "discord"
+        elif chat_platform == "telegram" and chat_ctx.get("channel_id"):
+            sched_room_id = None
+            sched_channel_id = chat_ctx["channel_id"]
+            sched_client = client or "telegram"
         else:
             sched_room_id = None
             sched_channel_id = None
@@ -3555,6 +3588,10 @@ def _run_tool(
             wh_room = None
             wh_channel = chat_ctx["channel_id"]
             wh_client = wh_client or "discord"
+        elif plat == "telegram" and chat_ctx.get("channel_id"):
+            wh_room = None
+            wh_channel = chat_ctx["channel_id"]
+            wh_client = wh_client or "telegram"
         else:
             wh_room = None
             wh_channel = None
@@ -4030,6 +4067,9 @@ def _send_debate_status(config: dict[str, Any], message: str) -> None:
         elif platform == "discord" and channel_id:
             from miniassistant.discord_bot import send_message_to_channel
             send_message_to_channel(channel_id, message)
+        elif platform == "telegram" and channel_id:
+            from miniassistant.telegram_bot import send_message_to_chat
+            send_message_to_chat(channel_id, message)
     except Exception:
         pass
 
@@ -4052,6 +4092,10 @@ def _notify_chat_compaction_start(config: dict[str, Any]) -> None:
             from miniassistant.discord_bot import send_message_to_channel, set_channel_typing
             send_message_to_channel(channel_id, msg)
             set_channel_typing(channel_id)
+        elif platform == "telegram" and channel_id:
+            from miniassistant.telegram_bot import send_message_to_chat, set_chat_typing
+            send_message_to_chat(channel_id, msg)
+            set_chat_typing(channel_id)
     except Exception:
         pass
 
@@ -4069,6 +4113,9 @@ def _notify_chat_compaction_done(config: dict[str, Any]) -> None:
         elif platform == "discord" and channel_id:
             from miniassistant.discord_bot import set_channel_typing
             set_channel_typing(channel_id)
+        elif platform == "telegram" and channel_id:
+            from miniassistant.telegram_bot import set_chat_typing
+            set_chat_typing(channel_id)
     except Exception:
         pass
 
@@ -4087,6 +4134,9 @@ def _set_debate_typing(config: dict[str, Any]) -> None:
         elif platform == "discord" and channel_id:
             from miniassistant.discord_bot import set_channel_typing
             set_channel_typing(channel_id)
+        elif platform == "telegram" and channel_id:
+            from miniassistant.telegram_bot import set_chat_typing
+            set_chat_typing(channel_id)
     except Exception:
         pass
 
@@ -4741,7 +4791,7 @@ def _run_subagent_google(
             paths_str = ", ".join(f"`{p}`" for p in _display_paths)
             # Matrix/Discord Group: Bilder direkt ausliefern (Model ruft send_image oft nicht auf).
             # Web/API: _pending_images injiziert automatisch. Matrix/Discord DM: Model ruft send_image.
-            if _img_platform in ("matrix", "discord") and _img_ctx.get("group_mode"):
+            if _img_platform in ("matrix", "discord", "telegram") and _img_ctx.get("group_mode"):
                 _delivered = 0
                 _capped = False
                 for _hp in saved_paths:
@@ -4756,7 +4806,7 @@ def _run_subagent_google(
                     total_content += f"\n\n(Turn-Bildlimit erreicht — restliche nicht gesendet: {paths_str})"
                 if not _delivered and not _capped:
                     total_content += f"\n\nBild(er) gespeichert: {paths_str}\nCall `send_image(image_path='{_display_paths[0]}')` to deliver."
-            elif _img_platform in ("matrix", "discord"):
+            elif _img_platform in ("matrix", "discord", "telegram"):
                 total_content += f"\n\nBild(er) gespeichert: {paths_str}\nCall `send_image(image_path='{_display_paths[0]}')` to deliver."
             else:
                 total_content += f"\n\nBild(er) gespeichert: {paths_str} (wird dem User inline angezeigt)"
@@ -5012,7 +5062,7 @@ def _run_subagent_openai(
                 })
                 _op_de = "bearbeitet" if _edit_src else "generiert"
                 _display_fpath = f"/workspace/images/{fpath.name}" if _img_ctx.get("group_mode") else str(fpath)
-                if _img_platform in ("matrix", "discord") and _img_ctx.get("group_mode"):
+                if _img_platform in ("matrix", "discord", "telegram") and _img_ctx.get("group_mode"):
                     _st = _auto_deliver_group_image(config, str(fpath), _caption)
                     if _st == "sent":
                         # Ruhig + erfolgs-gerahmt formulieren. Eine zu alarmierende Meldung
@@ -5030,7 +5080,7 @@ def _run_subagent_openai(
                         result = f"Bild {_op_de} (war bereits gesendet)."
                     else:
                         result = f"Bild {_op_de} und gespeichert: `{_display_fpath}`\nCall `send_image(image_path='{_display_fpath}')` to deliver."
-                elif _img_platform in ("matrix", "discord"):
+                elif _img_platform in ("matrix", "discord", "telegram"):
                     result = f"Bild {_op_de} und gespeichert: `{_display_fpath}`\nCall `send_image(image_path='{_display_fpath}')` to deliver."
                 else:
                     # Web/API: Bild wird inline injiziert (gilt als geliefert) → mitzählen,
@@ -7946,11 +7996,11 @@ def _handle_group_model_command(
 
     platform = str(ctx.get("platform") or "").strip().lower()
     target_id = ctx.get("room_id") or ctx.get("channel_id") or ""
-    store_key = "room_settings" if platform == "matrix" else "channel_settings"
+    store_key = {"matrix": "room_settings", "telegram": "chat_settings"}.get(platform, "channel_settings")
     # In der freigegebenen Form persistieren & anzeigen (Alias bleibt Alias) — zeigt
     # Raum-Mitgliedern keine vollen Modellnamen und überlebt Alias-Retargeting des Owners.
     store_model = _group_display_model(config, allow, requested)
-    if platform in ("matrix", "discord") and target_id:
+    if platform in ("matrix", "discord", "telegram") and target_id:
         # In-Memory setzen: chat_clients ist als nested dict mit der Bot-Basis-Config geteilt
         # (Bots machen pro Turn nur shallow copy) → nächster Turn sieht den Wechsel sofort.
         try:
@@ -8306,7 +8356,7 @@ def handle_user_input(
             if result:
                 platform, user_id = result
                 return f"{platform.capitalize()} freigeschaltet fuer `{user_id}`.", session, None, None, None, None
-            return "Code nicht gefunden (bereits eingelöst oder abgelaufen?). Im Matrix-/Discord-Chat einen neuen Code anfordern.", session, None, None, None, None
+            return "Code nicht gefunden (bereits eingelöst oder abgelaufen?). Im Matrix-/Discord-/Telegram-Chat einen neuen Code anfordern.", session, None, None, None, None
         except Exception as e:
             return f"Auth-Fehler: {e}", session, None, None, None, None
 
@@ -8358,7 +8408,8 @@ def handle_user_input(
         if chat_ctx.get("room_id"):
             ctx_lines.append(f"Matrix Room ID: `{_sanitize_ctx(str(chat_ctx['room_id']))}`")
         if chat_ctx.get("channel_id"):
-            ctx_lines.append(f"Discord Channel ID: `{_sanitize_ctx(str(chat_ctx['channel_id']))}`")
+            _cid_label = "Telegram Chat ID" if chat_ctx.get("platform") == "telegram" else "Discord Channel ID"
+            ctx_lines.append(f"{_cid_label}: `{_sanitize_ctx(str(chat_ctx['channel_id']))}`")
         effective_system_prompt += "\n".join(ctx_lines)
 
     # Compacting-Check vor chat_round (für Notification bei non-streaming Clients)

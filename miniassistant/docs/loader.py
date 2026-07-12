@@ -22,6 +22,7 @@ DOC_FILES = [
     "CONTEXT_SIZE.md",
     "DEBATE.md",
     "DISCORD.md",
+    "TELEGRAM.md",
     "GITHUB.md",
     "IMAGE_GENERATION.md",
     "MATRIX.md",

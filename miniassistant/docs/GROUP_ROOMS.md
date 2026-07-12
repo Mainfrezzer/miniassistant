@@ -1,6 +1,6 @@
 # Group Rooms
 
-Per-room/-channel context mode for Matrix rooms and Discord channels.
+Per-room/-channel context mode for Matrix rooms, Discord channels and Telegram group chats.
 
 ## Modes
 
@@ -53,6 +53,11 @@ chat_clients:
       "123456789":
         context: group
         ...
+  telegram:
+    chat_settings:
+      "-1001234567890":
+        context: group
+        ...
 ```
 
 PATCH endpoint: `/api/rooms/settings` (deep-merges; form-save preserves untouched fields).
@@ -73,7 +78,7 @@ Implementation: `group_rooms.build_group_chat_context` (ctx keys `group_model_sw
 
 ## Auto-Defaults on first contact
 
-When the bot receives a first message in a Matrix room with >2 members or a Discord server channel and no `room_settings` exists, the system persists:
+When the bot receives a first message in a Matrix room with >2 members, a Discord server channel, or a Telegram group/supergroup and no `room_settings` exists, the system persists:
 ```yaml
 context: group
 language: auto
@@ -92,7 +97,7 @@ Hard whitelist (`group_rooms.GROUP_ALLOWED_TOOLS`):
 - `exec` (bwrap-sandboxed, opt-in)
 - `read_recent_messages` — fetch last N messages of THIS room
 - `search_chat_history` — keyword/regex scan of room history
-- `get_user_profile` — fetch display name + avatar for a user IN this room (matrix: `@user:server`, discord: numeric ID). Returns sandbox-path `/workspace/avatars/<id>.<ext>` ready for `invoke_model(image_path=…)` img2img
+- `get_user_profile` — fetch display name + avatar for a user IN this room (matrix: `@user:server`, discord/telegram: numeric ID). Returns sandbox-path `/workspace/avatars/<id>.<ext>` ready for `invoke_model(image_path=…)` img2img
 - `invoke_model` — subagent calls + image gen/edit + VL describe. Opt-in (expensive + powerful)
 
 NOT available in group mode (hard-blocked even if mistakenly added):
@@ -198,7 +203,7 @@ Identity is immutable in group rooms: the bot may not save room-prefs like `name
 
 - Per turn the system tells the bot WHO is speaking via `_group_speaker_section` (display name + platform ID).
 - Other members are unknown until they speak (or via `read_recent_messages` / `get_user_profile`).
-- Cancel keys: `room:<room_id>` (matrix) / `chan:<channel_id>` (discord) — `/abort` from ANY participant stops the in-flight request.
+- Cancel keys: `room:<room_id>` (matrix) / `chan:<channel_id>` (discord + telegram) — `/abort` from ANY participant stops the in-flight request.
 - Busy-flag is per-room in group mode (not per-user). Parallel chats from two users in the same room are serialized.
 
 ## Authentication / Room-trust
@@ -259,6 +264,7 @@ In group mode:
 - `miniassistant/chat_loop.py` — exec branch with group-mode sandbox + pattern-block, tool whitelist filter, hard-reject in `_run_tool`, `get_user_profile` dispatch, `read_recent_messages` / `search_chat_history` dispatch, `invoke_model` with VL/edit/gen routing + path translation, per-turn config copy.
 - `miniassistant/matrix_bot.py` — routing + `_get_chat_response` (group_mode detection, room-trust auth bypass for text/image/file/audio, outgoing reply filter that degrades non-member matrix.to-links), `get_user_profile`, `fetch_recent_messages`, `search_chat_history`.
 - `miniassistant/discord_bot.py` — same surface for Discord, `_is_trusted` already covers all event types.
+- `miniassistant/telegram_bot.py` — same surface for Telegram (long-polling Bot API, own persisted history cache since Telegram has no history endpoints; see `TELEGRAM.md`).
 - `miniassistant/web/app.py` — `/api/rooms/settings` PATCH (per-room settings), `/api/config/form` POST (deep-merge), `/rooms` page (advanced settings hidden for DMs), `/logs` page with group dropdown.
 - `miniassistant/agent_actions_log.py` / `context_log.py` — group-mode-aware log paths.
 - `miniassistant/usage.py` — auto-detects `group_mode` from `_chat_context`, records `scope: group` for per-room API cost tracking. Visible in `/usage` only when group-usage exists.

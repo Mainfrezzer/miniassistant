@@ -26,7 +26,7 @@ Scheduled tasks are managed by the **schedule** tool and stored in `schedules.js
 - `when`: 5 cron fields in system time (e.g. `0 8 * * *` = 08:00 daily) or `'in 30 minutes'`
 - `prompt`: plain language task — the bot re-executes this fresh each time
 - `once`: true = run once then delete (for reminders, one-time notifications)
-- `client`: `'matrix'` / `'discord'` (default: room/channel where schedule was created)
+- `client`: `'matrix'` / `'discord'` / `'telegram'` (default: room/channel/chat where schedule was created)
 - `model`: model alias to use (only set if user explicitly requests it)
 
 **Weekday numbering (5th field):** APScheduler, NOT UNIX cron. `0=Mon, 1=Tue, ..., 6=Sun`. Use names to avoid confusion: `mon,tue,wed,thu,fri,sat,sun`. Ranges work: `mon-fri`. Classic cron `* * * * 0` (Sunday) fires on **Monday** here.
