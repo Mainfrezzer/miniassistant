@@ -42,7 +42,8 @@ _NESTED_VARS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "OPENCODE")
 
 _DEFAULT_MAX_RUNTIME = 1200      # 20 min pro Job
 _DEFAULT_MAX_CONCURRENT = 3
-_DEFAULT_MAX_RETRIES = 2
+
+_TERMINAL_STATES = ("done", "failed", "timeout", "crashed", "cancelled")
 
 
 # ── binary / env ────────────────────────────────────────────────────────────
@@ -116,8 +117,24 @@ def _pgid_alive(pgid: int) -> bool:
         return True
 
 
-def _kill_pgid(pgid: int) -> None:
+def _pgid_safe_to_kill(pgid: int, job_id: str) -> bool:
+    """Guard against recycled PIDs after a MiniAssistant restart: the spawned sh
+    wrapper's cmdline contains the job's log path (job_id). If the group leader is
+    gone but the group still exists, Linux won't recycle that PID while it remains
+    a live pgid → orphaned children, safe to kill."""
+    try:
+        with open(f"/proc/{pgid}/cmdline", "rb") as f:
+            cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return True
+    return job_id in cmd or "opencode" in cmd
+
+
+def _kill_pgid(pgid: int, job_id: str | None = None) -> None:
     if not pgid or pgid <= 1:
+        return
+    if job_id and not _pgid_safe_to_kill(pgid, job_id):
+        _log.warning("opencode: pgid %s no longer matches job %s (recycled pid?) — not killing", pgid, job_id)
         return
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -160,10 +177,7 @@ def _make_worktree(repo: str, job_id: str, config: dict[str, Any]) -> str | None
         return None
 
 
-def remove_worktree(config: dict[str, Any], job_id: str) -> None:
-    entry = _read_entry(config, job_id)
-    if not entry:
-        return
+def remove_worktree(config: dict[str, Any], entry: dict[str, Any]) -> None:
     wt, repo = entry.get("worktree"), entry.get("repo")
     if wt and repo and os.path.isdir(wt):
         try:
@@ -171,6 +185,7 @@ def remove_worktree(config: dict[str, Any], job_id: str) -> None:
                 ["git", "-C", repo, "worktree", "remove", "--force", wt],
                 capture_output=True, text=True, timeout=60,
             )
+            _log.info("opencode: removed worktree of finished job %s", entry.get("id"))
         except Exception as e:
             _log.warning("worktree remove error: %s", e)
 
@@ -372,14 +387,14 @@ def _git_diff_stat(entry: dict[str, Any]) -> str:
         return ""
 
 
-def job_status(config: dict[str, Any], job_id: str, *, with_diff: bool = True) -> dict[str, Any]:
-    """Status from rc-file + process-group liveness. Enforces runtime cap, extracts session/result."""
-    entry = _read_entry(config, job_id)
-    if not entry:
-        return {"status": "not_found", "id": job_id}
-
-    _, _, rc_p = _job_paths(config, job_id)
+def _refresh_entry(config: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    """Transition running → done/failed/timeout/crashed from rc-file + PID liveness,
+    persist changes, and prune the worktree of terminal jobs whose result was read.
+    Applied by job_status AND job_list, so never-polled jobs don't stay 'running'
+    forever (occupying max_concurrent slots)."""
+    job_id = entry.get("id", "")
     if entry.get("status") == "running":
+        _, _, rc_p = _job_paths(config, job_id)
         if rc_p.exists():
             try:
                 code = int(rc_p.read_text().strip() or "1")
@@ -391,7 +406,7 @@ def job_status(config: dict[str, Any], job_id: str, *, with_diff: bool = True) -
         else:
             elapsed = time.time() - float(entry.get("started", 0))
             if elapsed > float(entry.get("max_runtime", _DEFAULT_MAX_RUNTIME)):
-                _kill_pgid(int(entry.get("pgid", 0)))
+                _kill_pgid(int(entry.get("pgid", 0)), job_id)
                 entry["status"] = "timeout"
                 entry["ended"] = time.time()
             elif not _pgid_alive(int(entry.get("pgid", 0))):
@@ -404,13 +419,29 @@ def job_status(config: dict[str, Any], job_id: str, *, with_diff: bool = True) -
         if parsed.get("cost") is not None:
             entry["cost"] = parsed["cost"]
         _write_entry(config, entry)
+    # Worktree cleanup: only for terminal jobs whose result was returned at least
+    # once (job_status sets result_read) — never delete unseen work.
+    if entry.get("status") in _TERMINAL_STATES and entry.get("result_read"):
+        remove_worktree(config, entry)
+    return entry
+
+
+def job_status(config: dict[str, Any], job_id: str, *, with_diff: bool = True) -> dict[str, Any]:
+    """Status from rc-file + process-group liveness. Enforces runtime cap, extracts session/result."""
+    entry = _read_entry(config, job_id)
+    if not entry:
+        return {"status": "not_found", "id": job_id}
+    entry = _refresh_entry(config, entry)
 
     out = dict(entry)
     out["elapsed"] = round(time.time() - float(entry.get("started", 0)), 1)
     if with_diff:
         out["diff_stat"] = _git_diff_stat(entry)
-        if entry.get("status") in ("done", "failed", "timeout", "crashed"):
+        if entry.get("status") in _TERMINAL_STATES:
             out["result"] = _parse_log(config, job_id).get("text", "")
+            if not entry.get("result_read"):
+                entry["result_read"] = True
+                _write_entry(config, entry)
     return out
 
 
@@ -419,7 +450,7 @@ def job_cancel(config: dict[str, Any], job_id: str) -> dict[str, Any]:
     if not entry:
         return {"status": "not_found", "id": job_id}
     if entry.get("status") == "running":
-        _kill_pgid(int(entry.get("pgid", 0)))
+        _kill_pgid(int(entry.get("pgid", 0)), job_id)
         entry["status"] = "cancelled"
         entry["ended"] = time.time()
         _write_entry(config, entry)
@@ -430,26 +461,8 @@ def job_list(config: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
     for meta in sorted(_jobs_dir(config).glob("*.json")):
         try:
-            out.append(json.loads(meta.read_text()))
+            entry = json.loads(meta.read_text())
         except Exception:
             continue
+        out.append(_refresh_entry(config, entry))
     return out
-
-
-def retry_job(config: dict[str, Any], job_id: str) -> dict[str, Any]:
-    """Re-dispatch a timed-out/crashed job. NOT for failed (needs a corrected prompt)."""
-    entry = _read_entry(config, job_id)
-    if not entry:
-        return {"status": "not_found", "id": job_id}
-    if entry.get("status") not in ("timeout", "crashed"):
-        return {"status": "rejected", "error": f"retry only for timeout/crashed, not {entry.get('status')}"}
-    attempt = int(entry.get("attempt", 1)) + 1
-    max_retries = int(_oc_cfg(config).get("max_retries", _DEFAULT_MAX_RETRIES))
-    if attempt > max_retries + 1:
-        return {"status": "rejected", "error": f"max_retries={max_retries} exhausted"}
-    return start_job(
-        config, entry["prompt"], entry["repo"],
-        model=entry.get("model"), agent=entry.get("agent"), preset=entry.get("preset"),
-        use_worktree=bool(entry.get("worktree")),
-        parent_id=entry.get("parent_id") or job_id, attempt=attempt,
-    )

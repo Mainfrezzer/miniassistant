@@ -55,8 +55,10 @@ _PASSTHROUGH_TUNING_KEYS = (
     # Advanced/AIO-Prompt: {enabled: bool, file: path} — ersetzt den ganzen System-Prompt.
     "advanced_prompt", "knowledge_cutoff",
     # OpenCode coding-connector: {enabled, default_repo, jobs_dir, max_concurrent,
-    #   max_runtime, max_retries, presets: {name: {model, agent, max_runtime}}}
+    #   max_runtime, presets: {name: {model, agent, max_runtime}}}
     "opencode",
+    # Bild-Cap pro Turn (chat_loop) + Chat-Storage-Verzeichnis (web/app.py)
+    "images_max_per_turn", "chats_dir",
 )
 
 # ---------------------------------------------------------------------------
@@ -136,17 +138,6 @@ def _search_engines_merged(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _default_search_engine_merged(data: dict[str, Any]) -> str | None:
     engines = _normalize_search_engines(data.get("search_engines"))
     return _default_search_engine_id(engines, data.get("default_search_engine"))
-
-
-def get_search_engine_url(config: dict[str, Any], engine_id: str | None = None) -> str | None:
-    """URL für eine Suchmaschine. engine_id=None = konfigurierte Default-Engine."""
-    engines = config.get("search_engines") or {}
-    if not engines:
-        return None
-    eid = engine_id or config.get("default_search_engine") or next(iter(engines), None)
-    if not eid or eid not in engines:
-        return None
-    return (engines[eid].get("url") or "").strip() or None
 
 
 def get_search_engine_for_request(config: dict[str, Any], engine_id: str | None = None) -> tuple[str | None, str | None]:
@@ -620,25 +611,6 @@ def _parse_provider(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _parse_model_ref(raw: Any) -> dict[str, Any] | None:
-    """Parst eine vision Config-Referenz.
-    Akzeptiert str ('llava:13b') oder dict ({model: 'llava:13b', num_ctx: 32768}).
-    Gibt None zurück wenn nicht gesetzt."""
-    if not raw:
-        return None
-    if isinstance(raw, str):
-        return {"model": raw.strip()} if raw.strip() else None
-    if isinstance(raw, dict):
-        model = (raw.get("model") or "").strip()
-        if not model:
-            return None
-        out: dict[str, Any] = {"model": model}
-        if raw.get("num_ctx"):
-            out["num_ctx"] = int(raw["num_ctx"])
-        return out
-    return None
-
-
 def _parse_model_ref_list(raw: Any) -> list[str]:
     """Parst image_generation Config – gibt Liste von Modellnamen zurück.
     Akzeptiert str ('dall-e-3'), list (['dall-e-3', 'gemini-2.0-flash-exp']),
@@ -893,6 +865,7 @@ def save_config(config: dict[str, Any], project_dir: str | None = None) -> Path:
         "subagents": list(config.get("subagents") or []),
         "fallbacks": list(config.get("fallbacks") or []),
         "raw_proxy": config.get("raw_proxy") or {},
+        "slot_cache": config.get("slot_cache") or {},
         "mempalace": _clean_mempalace_for_save(config.get("mempalace") or {}),
     }
     if config.get("trash_dir"):

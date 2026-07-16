@@ -20,6 +20,26 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
+def _split_for_limit(message: str, limit: int) -> list[str]:
+    """Split a message into chunks below a platform hard limit.
+    Prefers paragraph, then line boundaries; hard-splits as last resort."""
+    if len(message) <= limit:
+        return [message]
+    chunks: list[str] = []
+    rest = message
+    while len(rest) > limit:
+        cut = rest.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            cut = rest.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        chunks.append(rest)
+    return chunks
+
+
 def _is_valid_discord_id(value: Any) -> bool:
     """Discord-IDs sind dezimale Snowflakes (17-20 Ziffern). Verhindert URL-Path-Injection."""
     s = str(value or "").strip()
@@ -120,11 +140,12 @@ def _send_telegram_to_chat(tc: dict[str, Any], message: str, chat_id: str) -> st
             return f"gesendet in Chat {chat_id}"
     except Exception as e:
         logger.debug("Telegram Bot -> Chat %s fehlgeschlagen: %s", chat_id, e)
-    ok, err = _telegram_api(tc, "sendMessage", {"chat_id": chat_id, "text": message})
-    if ok:
-        logger.info("Telegram -> Chat %s (via HTTP)", chat_id)
-        return f"gesendet in Chat {chat_id}"
-    return f"senden fehlgeschlagen: {err}"
+    for _chunk in _split_for_limit(message, 4000):
+        ok, err = _telegram_api(tc, "sendMessage", {"chat_id": chat_id, "text": _chunk})
+        if not ok:
+            return f"senden fehlgeschlagen: {err}"
+    logger.info("Telegram -> Chat %s (via HTTP)", chat_id)
+    return f"gesendet in Chat {chat_id}"
 
 
 def _send_telegram(tc: dict[str, Any], message: str, config_dir: str | None = None) -> str:
@@ -141,7 +162,11 @@ def _send_telegram(tc: dict[str, Any], message: str, config_dir: str | None = No
         uid = entry.get("user_id", entry) if isinstance(entry, dict) else entry
         if not uid or not isinstance(uid, str) or not _is_valid_telegram_id(uid):
             continue
-        ok, err = _telegram_api(tc, "sendMessage", {"chat_id": uid, "text": message})
+        ok, err = True, ""
+        for _chunk in _split_for_limit(message, 4000):
+            ok, err = _telegram_api(tc, "sendMessage", {"chat_id": uid, "text": _chunk})
+            if not ok:
+                break
         if ok:
             sent_to.append(uid)
         else:
@@ -258,7 +283,10 @@ def _send_matrix_http(mc: dict[str, Any], mx_user: str, message: str) -> bool:
     except Exception:
         return False
 
+    # DM bevorzugen (genau 2 Member: Bot + Ziel-User) — sonst landet eine
+    # Owner-Notification im erstbesten geteilten Gruppenraum.
     room_id = None
+    _fallback_room = None
     for rid in rooms:
         try:
             url = f"{homeserver}/_matrix/client/v3/rooms/{urllib.parse.quote(rid)}/joined_members"
@@ -266,10 +294,15 @@ def _send_matrix_http(mc: dict[str, Any], mx_user: str, message: str) -> bool:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 members = json.loads(resp.read()).get("joined", {})
             if mx_user in members:
-                room_id = rid
-                break
+                if len(members) == 2:
+                    room_id = rid
+                    break
+                if _fallback_room is None:
+                    _fallback_room = rid
         except Exception:
             continue
+    if not room_id:
+        room_id = _fallback_room
 
     if not room_id:
         return False
@@ -781,20 +814,21 @@ def _send_discord(dc: dict[str, Any], message: str, config_dir: str | None = Non
             if not channel_id or not _is_valid_discord_id(channel_id):
                 continue
 
-            # Nachricht senden
+            # Nachricht senden (Discord-Hardlimit 2000 Zeichen → chunken)
             send_url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-            body = json.dumps({"content": message}).encode()
-            req = urllib.request.Request(
-                send_url,
-                data=body,
-                headers={
-                    "Authorization": f"Bot {bot_token}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "miniassistant/1.0",
-                },
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=10)
+            for _chunk in _split_for_limit(message, 1990):
+                body = json.dumps({"content": _chunk}).encode()
+                req = urllib.request.Request(
+                    send_url,
+                    data=body,
+                    headers={
+                        "Authorization": f"Bot {bot_token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "miniassistant/1.0",
+                    },
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=10)
             sent_to.append(discord_user_id)
         except Exception as e:
             logger.warning("Discord -> %s fehlgeschlagen: %s", discord_user_id, e)
@@ -816,18 +850,19 @@ def _send_discord_to_channel(dc: dict[str, Any], message: str, channel_id: str) 
 
     try:
         send_url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-        body = json.dumps({"content": message}).encode()
-        req = urllib.request.Request(
-            send_url,
-            data=body,
-            headers={
-                "Authorization": f"Bot {bot_token}",
-                "Content-Type": "application/json",
-                "User-Agent": "miniassistant/1.0",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=10)
+        for _chunk in _split_for_limit(message, 1990):
+            body = json.dumps({"content": _chunk}).encode()
+            req = urllib.request.Request(
+                send_url,
+                data=body,
+                headers={
+                    "Authorization": f"Bot {bot_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "miniassistant/1.0",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=10)
         logger.info("Discord -> Channel %s", channel_id)
         return f"gesendet in Channel {channel_id}"
     except Exception as e:

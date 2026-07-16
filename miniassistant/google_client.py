@@ -40,7 +40,7 @@ def _api_headers(api_key: str) -> dict[str, str]:
     }
 
 
-def _model_url(base_url: str, model: str, action: str, api_key: str | None = None) -> str:
+def _model_url(base_url: str, model: str, action: str) -> str:
     """Baut die URL für ein Modell + Action. api_key wird NICHT als Query-Param angehängt (Header stattdessen)."""
     base = base_url.rstrip("/")
     # Modellname normalisieren: wenn kein 'models/' Prefix, hinzufügen
@@ -121,15 +121,23 @@ def _convert_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # Tool-Ergebnis → functionResponse
             tool_name = msg.get("tool_name", "tool")
             content = msg.get("content", "")
-            api_msgs.append({
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": tool_name,
-                        "response": {"result": content},
-                    }
-                }],
-            })
+            fr_part = {
+                "functionResponse": {
+                    "name": tool_name,
+                    "response": {"result": content},
+                }
+            }
+            # Parallel tool results → merge into one user turn (Gemini pairs them
+            # with the functionCall parts of the preceding model turn)
+            if (
+                api_msgs
+                and api_msgs[-1].get("role") == "user"
+                and api_msgs[-1].get("parts")
+                and all("functionResponse" in p for p in api_msgs[-1]["parts"])
+            ):
+                api_msgs[-1]["parts"].append(fr_part)
+            else:
+                api_msgs.append({"role": "user", "parts": [fr_part]})
             continue
 
         # user oder assistant (→ model)
@@ -160,6 +168,21 @@ def _convert_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "data": img,
                     }
                 })
+
+        # Assistant tool_calls → functionCall parts (Gemini requires a model
+        # functionCall turn before every functionResponse turn)
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                parts.append({"functionCall": {"name": fn.get("name", ""), "args": args}})
 
         if parts:
             api_msgs.append({"role": gemini_role, "parts": parts})
@@ -467,6 +490,7 @@ def api_chat_stream(
 
     headers = _api_headers(api_key)
 
+    _done_emitted = False
     with httpx.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
         resp.raise_for_status()
         for line in resp.iter_lines():
@@ -508,8 +532,18 @@ def api_chat_stream(
                     }
 
             finish = candidates[0].get("finishReason")
-            if finish and finish == "STOP":
-                yield {"done": True}
+            if finish:
+                # Emit done for EVERY finish reason (MAX_TOKENS/SAFETY/RECITATION/…),
+                # not only STOP — callers must never see a silent stream end.
+                if finish != "STOP":
+                    yield {"message": {"content": f"\n[Gemini: stream ended, finishReason={finish}]"}, "done": False}
+                yield {"done": True, "finish_reason": finish}
+                _done_emitted = True
+                break
+
+        if not _done_emitted:
+            # Stream ended without any finishReason → still signal done
+            yield {"done": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

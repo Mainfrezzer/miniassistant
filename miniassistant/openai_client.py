@@ -19,6 +19,7 @@ import json
 import logging
 import re
 from typing import Any, Generator
+from urllib.parse import urljoin
 
 import httpx
 
@@ -154,6 +155,18 @@ def _convert_messages(
             else:
                 # Standard OpenAI tool_call_id matching
                 tool_call_id = msg.get("tool_call_id", "")
+                if not tool_call_id:
+                    # Reconstruct positionally: Nth tool result since the last assistant
+                    # message pairs with its Nth tool_call (chat_loop stores no ids).
+                    tool_idx = 0
+                    for prev in reversed(api_msgs):
+                        if prev.get("role") == "tool":
+                            tool_idx += 1
+                        elif prev.get("role") == "assistant":
+                            break
+                    pending = prev_assistant.get("tool_calls") or []
+                    if tool_idx < len(pending):
+                        tool_call_id = pending[tool_idx].get("id", "")
                 if not tool_call_id:
                     _tool_call_counter += 1
                     tool_call_id = f"call_{_tool_call_counter}"
@@ -534,6 +547,33 @@ def api_chat_stream(
     _usage: dict[str, Any] | None = None
     _timings: dict[str, Any] | None = None
 
+    def _emit_final() -> Generator[dict[str, Any], None, None]:
+        """Flush accumulated tool calls + done event (at [DONE] or on stream end without it)."""
+        if _tool_calls_acc:
+            tcs = []
+            for idx in sorted(_tool_calls_acc.keys()):
+                tc = _tool_calls_acc[idx]
+                args_str = tc.get("arguments", "")
+                try:
+                    args = json.loads(args_str) if args_str else {}
+                except json.JSONDecodeError:
+                    args = {}
+                tcs.append({
+                    "id": tc.get("id", ""),
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": args,
+                    },
+                })
+            yield {"message": {"tool_calls": tcs}, "done": False}
+        _done: dict[str, Any] = {"done": True}
+        if _usage:
+            _done["usage"] = _usage
+        if _timings:
+            _done["timings"] = _timings
+        yield _done
+
+    _finished = False
     with httpx.stream("POST", url, headers=headers, json=body, timeout=timeout) as resp:
         resp.raise_for_status()
         for line in resp.iter_lines():
@@ -541,30 +581,8 @@ def api_chat_stream(
                 continue
             data_str = line[6:]
             if data_str.strip() == "[DONE]":
-                # Akkumulierte Tool-Calls als finalen Chunk senden
-                if _tool_calls_acc:
-                    tcs = []
-                    for idx in sorted(_tool_calls_acc.keys()):
-                        tc = _tool_calls_acc[idx]
-                        args_str = tc.get("arguments", "")
-                        try:
-                            args = json.loads(args_str) if args_str else {}
-                        except json.JSONDecodeError:
-                            args = {}
-                        tcs.append({
-                            "id": tc.get("id", ""),
-                            "function": {
-                                "name": tc.get("name", ""),
-                                "arguments": args,
-                            },
-                        })
-                    yield {"message": {"tool_calls": tcs}, "done": False}
-                _done: dict[str, Any] = {"done": True}
-                if _usage:
-                    _done["usage"] = _usage
-                if _timings:
-                    _done["timings"] = _timings
-                yield _done
+                yield from _emit_final()
+                _finished = True
                 break
             try:
                 event = json.loads(data_str)
@@ -608,6 +626,11 @@ def api_chat_stream(
             # Grund: Tool-Calls werden in _tool_calls_acc akkumuliert und erst
             # beim [DONE]-Sentinel geliefert. Ein früher Ausstieg bei finish_reason
             # würde sie verlieren (race condition bei vLLM mit tool-call-parser).
+
+        if not _finished:
+            # Stream ended without [DONE] (non-conformant backend / connection close):
+            # still flush accumulated tool calls + emit done instead of dropping them.
+            yield from _emit_final()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -784,7 +807,6 @@ def api_generate_image(
 
     def _parse(resp) -> dict:
         import base64 as _b64
-        from urllib.parse import urljoin
         # Normalize response — some backends return list or nested structures
         if isinstance(resp, list):
             data = resp[0] if resp else {}

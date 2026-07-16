@@ -316,12 +316,12 @@ func getTermWidth() int {
 
 func initColors() {
 	if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
-		bold   = "\033[1m"
-		green  = "\033[32m"
-		dim    = "\033[2m"
-		reset  = "\033[0m"
+		bold = "\033[1m"
+		green = "\033[32m"
+		dim = "\033[2m"
+		reset = "\033[0m"
 		yellow = "\033[33m"
-		cyan   = "\033[36m"
+		cyan = "\033[36m"
 	}
 }
 
@@ -333,7 +333,7 @@ var availableLocalTools = []struct {
 	Name        string
 	Description string
 }{
-	{"exec",     "Shell-Befehle ausführen"},
+	{"exec", "Shell-Befehle ausführen"},
 	{"read_url", "URLs abrufen"},
 }
 
@@ -1019,7 +1019,8 @@ func runChat(cfg Config, preload *Session) {
 		}
 
 		scanner := bufio.NewScanner(streamResp.Body)
-		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		// done-Zeile trägt die volle History — großzügiges Limit gegen ErrTooLong
+		scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -1117,7 +1118,7 @@ func runChat(cfg Config, preload *Session) {
 				}
 				if content != "" {
 					tpsLabel := ""
-					if len(ev.TPS) > 0 {
+					if len(ev.TPS) > 1 {
 						tpsVal, _ := ev.TPS[0].(float64)
 						tpsExact, _ := ev.TPS[1].(bool)
 						if tpsVal > 0 {
@@ -1169,6 +1170,9 @@ func runChat(cfg Config, preload *Session) {
 					}
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "%sStream-Lesefehler: %v%s\n", yellow, err, reset)
 		}
 		stopSpinOnce()
 		streamResp.Body.Close()
@@ -1242,7 +1246,8 @@ func runQuestion(cfg Config, question string) {
 
 	var contentBuf strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	// done-Zeile trägt die volle History — großzügiges Limit gegen ErrTooLong
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1268,11 +1273,10 @@ func runQuestion(cfg Config, question string) {
 				os.Exit(1)
 			}
 			return
-		case "error":
-			stopSpin()
-			fmt.Fprintf(os.Stderr, "Fehler: %s\n", ev.Error)
-			os.Exit(1)
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Stream-Lesefehler: %v\n", err)
 	}
 	stopSpin()
 }

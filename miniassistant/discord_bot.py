@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -17,15 +18,6 @@ _discord_loop: asyncio.AbstractEventLoop | None = None
 
 # Cache: guild_id (int) -> inviter user_id (str) of the bot. None = looked up, no inviter found.
 _guild_inviter_cache: dict[int, str | None] = {}
-
-
-def get_guild_inviter(guild_id: int) -> str | None:
-    """Sync cached lookup of the user who added the bot to a Discord guild."""
-    return _guild_inviter_cache.get(int(guild_id))
-
-
-def get_guild_inviter_cache() -> dict[int, str | None]:
-    return dict(_guild_inviter_cache)
 
 
 def leave_guild(guild_id: str) -> tuple[bool, str]:
@@ -441,8 +433,15 @@ def _get_chat_response(
                 except Exception:
                     pass
                 prev = fetch_recent_messages(channel_id, limit=ac_count + 1)
-                if prev and (prev[-1].get("body") or "").strip() == user_message.strip():
-                    prev = prev[:-1]
+                # Trigger-Nachricht entfernen: sender+body-Match in den letzten 5 Einträgen
+                # (nicht nur dem letzten — dazwischen kann schon Neues eingetroffen sein).
+                _um = user_message.strip()
+                for _i in range(len(prev) - 1, max(0, len(prev) - 5) - 1, -1):
+                    _pm = prev[_i]
+                    _psender = str(_pm.get("sender") or "")
+                    if (_pm.get("body") or "").strip() == _um and (not _psender or _psender == str(discord_user_id)):
+                        prev.pop(_i)
+                        break
                 prev = prev[-ac_count:] if len(prev) > ac_count else prev
                 blk = format_auto_context(prev, max_chars=ac_max, bot_sender=bot_sender, max_age_min=ac_age)
                 from miniassistant.room_images import format_block as _ri_block
@@ -456,8 +455,11 @@ def _get_chat_response(
     if channel_id:
         config["_chat_context"] = ctx
     # Group-Mode: stateless — jeder Turn frische Session (auto-context + read_recent_messages liefern Kontext).
-    if ctx.get("group_mode") or session_key not in sessions:
+    # Agent-Räume: Session neu bauen wenn Raum-Settings (Kontext/Sprache/Modell) sich geändert haben.
+    _room_sig = f"{rs.get('context')}|{rs.get('language')}|{rs.get('model')}"
+    if ctx.get("group_mode") or session_key not in sessions or sessions[session_key].get("_room_sig") != _room_sig:
         session = create_session(config, None)
+        session["_room_sig"] = _room_sig
         session["system_prompt"] = (
             session.get("system_prompt", "") +
             "\n\nDiscord: Max 2000 Zeichen/Nachricht. Laengere Antworten mit `---` trennen, werden automatisch aufgeteilt."
@@ -522,8 +524,20 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
 
     # Sessions pro (channel, discord_user) — LRU mit Cap, sonst wachsen sie unbegrenzt
     discord_sessions: Any = SessionLRU(max_size=200)
-    # Pending Images: User hat Bild ohne Text geschickt → nächste Textnachricht bekommt das Bild
+    # Pending Images: User hat Bild ohne Text geschickt → nächste Textnachricht bekommt das Bild.
+    # Key = "sender|channel" (kein Cross-Chat-Leak), TTL-Prune gegen unbegrenztes Wachstum.
     _pending_images: dict[str, list[dict[str, Any]]] = {}
+    _pending_images_ts: dict[str, float] = {}
+    _PENDING_TTL_S = 6 * 3600
+
+    def _prune_pending() -> None:
+        _now = time.time()
+        for _k in [k for k, t in _pending_images_ts.items() if _now - t > _PENDING_TTL_S]:
+            _pending_images_ts.pop(_k, None)
+            _pending_images.pop(_k, None)
+
+    # Per-Sender Busy-Guard: zwei parallele Runs auf derselben Session korrumpieren die History
+    _busy_users: set[str] = set()
 
     # Discord-Client mit Intents
     intents = discord.Intents.default()
@@ -597,6 +611,24 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
 
         sender_id = str(message.author.id)
         body = message.content.strip()
+
+        # /stop, /abort, /abbruch VOR dem Tageslimit parsen: ein User am Limit muss
+        # eine laufende Verarbeitung trotzdem abbrechen können.
+        import re as _re_cancel_d
+        _cancel_tokens = set(_re_cancel_d.split(r"\s+", body.strip().lower()))
+        _cancel_tokens |= {("/" + t[1:]) for t in _cancel_tokens if t.startswith(":") and len(t) > 1}
+        _cancel_hit = _cancel_tokens & {"/stop", "/abort", "/abbruch"}
+        if _cancel_hit:
+            _cancel_cmd = sorted(_cancel_hit)[0]
+            from miniassistant.cancellation import request_cancel
+            level = "stop" if _cancel_cmd == "/stop" else "abort"
+            channel_id = str(message.channel.id) if hasattr(message, "channel") else ""
+            cancel_key = f"chan:{channel_id}" if (not is_dm and channel_id) else sender_id
+            request_cancel(cancel_key, level)
+            logger.info("Discord: %s von %s — Cancellation angefordert (%s, key=%s)", body[:40], sender_id, level, cancel_key)
+            reply = "⏹ Verarbeitung wird abgebrochen…" if level == "abort" else "⏸ Verarbeitung wird nach aktuellem Schritt gestoppt…"
+            await message.reply(reply)
+            return
 
         # Per-User-Tageslimit (channel_settings.user_daily_limit; 0/fehlt = unbegrenzt).
         # Hinweis nur bei der ersten abgelehnten Nachricht des Tages, danach still.
@@ -706,7 +738,9 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
             try:
                 from miniassistant import wyoming_client as _wyoming
                 lang = get_voice_language(config)
-                transcript = _wyoming.transcribe(audio_bytes, stt_url, language=lang)
+                # Blocking socket/ffmpeg I/O — nie direkt im Event-Loop (Heartbeat-Stall)
+                transcript = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _wyoming.transcribe(audio_bytes, stt_url, language=lang))
             except Exception as e:
                 logger.exception("Discord Audio: STT fehlgeschlagen")
                 await message.reply(f"Spracherkennung fehlgeschlagen: {e}")
@@ -716,16 +750,24 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
                 return
             logger.info("Discord Audio: Transkript von %s: %s", sender_id, transcript[:80])
             # Typing über gesamten Flow: Agent → TTS → Upload (sonst „still" während TTS-Synthese)
+            if sender_id in _busy_users:
+                await message.reply("⏳ Ich arbeite noch an deiner vorherigen Anfrage — einen Moment bitte.")
+                return
             async with message.channel.typing():
+                _busy_users.add(sender_id)
                 try:
+                    _mems_v = getattr(message.channel, "members", None)
+                    _grp_v = (not is_dm) and (len(_mems_v) > 2 if _mems_v else True)
                     response = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: _get_chat_response(config, sender_id, f"[Voice] {transcript}", discord_sessions, channel_id=str(message.channel.id), is_group=(not is_dm)),
+                        lambda g=_grp_v: _get_chat_response(config, sender_id, f"[Voice] {transcript}", discord_sessions, channel_id=str(message.channel.id), is_group=g),
                     )
                 except Exception as e:
                     logger.exception("Discord Audio: Agent fehlgeschlagen")
                     await message.reply(f"Fehler: {e}")
                     return
+                finally:
+                    _busy_users.discard(sender_id)
                 if not response:
                     return
                 from miniassistant.voice_format import format_for_voice
@@ -734,7 +776,8 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
                 if tts_url and voice_text:
                     try:
                         tts_voice = get_voice_tts_voice(config)
-                        wav_bytes = _wyoming.synthesize(voice_text, tts_url, voice=tts_voice)
+                        wav_bytes = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: _wyoming.synthesize(voice_text, tts_url, voice=tts_voice))
                         import io as _io
                         await message.reply(file=discord.File(_io.BytesIO(wav_bytes), filename="response.wav"))
                         from miniassistant import agent_actions_log as _aal
@@ -751,35 +794,22 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
 
         # Bild ohne Text → Pending speichern, User fragen
         # (nur bei reinem Bild ohne Dokument; Dokument hat eigenen Text-Inhalt)
+        _pend_key = f"{sender_id}|{ch_id}"
         if msg_images and not body and not msg_docs:
-            _pending_images.setdefault(sender_id, []).extend(msg_images)
+            _prune_pending()
+            _pending_images.setdefault(_pend_key, []).extend(msg_images)
+            _pending_images_ts[_pend_key] = time.time()
             await message.reply("Bild empfangen. Was soll ich damit machen?")
             return
 
         if not body and not msg_images and not msg_docs:
             return
 
-        # /stop, /abort, /abbruch: Token-basiert (egal ob mit @-mention, display-name, oder ':' statt '/').
-        import re as _re_cancel_d
-        _cancel_tokens = set(_re_cancel_d.split(r"\s+", body.strip().lower()))
-        _cancel_tokens |= {("/" + t[1:]) for t in _cancel_tokens if t.startswith(":") and len(t) > 1}
-        _cancel_hit = _cancel_tokens & {"/stop", "/abort", "/abbruch"}
-        if _cancel_hit:
-            _cancel_cmd = sorted(_cancel_hit)[0]
-            from miniassistant.cancellation import request_cancel
-            level = "stop" if _cancel_cmd == "/stop" else "abort"
-            # Gruppen-Channels: room-wide cancel
-            channel_id = str(message.channel.id) if hasattr(message, "channel") else ""
-            cancel_key = f"chan:{channel_id}" if (not is_dm and channel_id) else sender_id
-            request_cancel(cancel_key, level)
-            logger.info("Discord: %s von %s — Cancellation angefordert (%s, key=%s)", body[:40], sender_id, level, cancel_key)
-            reply = "⏹ Verarbeitung wird abgebrochen…" if level == "abort" else "⏸ Verarbeitung wird nach aktuellem Schritt gestoppt…"
-            await message.reply(reply)
-            return
-
-        # Pending Images abholen (Bild wurde vorher ohne Text geschickt)
-        if not msg_images and sender_id in _pending_images:
-            msg_images = _pending_images.pop(sender_id)
+        # Pending Images abholen (Bild wurde vorher ohne Text im SELBEN Channel geschickt)
+        _prune_pending()
+        if not msg_images and _pend_key in _pending_images:
+            msg_images = _pending_images.pop(_pend_key)
+            _pending_images_ts.pop(_pend_key, None)
 
         logger.info("Discord: Nachricht von %s (%s): %.80s", message.author, sender_id, body)
 
@@ -806,16 +836,25 @@ async def run_discord_bot(config: dict[str, Any]) -> None:
             if doc_text:
                 body = f"{doc_text}\n\n{body}".strip() if body else f"{doc_text}\n\nBitte uebersetze oder fasse das Dokument zusammen."
 
-        # Typing-Indicator + KI-Antwort
+        # Typing-Indicator + KI-Antwort (per-Sender Busy-Guard wie Matrix)
+        if sender_id in _busy_users:
+            await message.reply("⏳ Ich arbeite noch an deiner vorherigen Anfrage — einen Moment bitte.")
+            return
         async with message.channel.typing():
+            _busy_users.add(sender_id)
             try:
+                # Gruppen-Default nur bei >2 Membern (wie Matrix) — 2er-Guild-Channel bleibt Agent-Kontext
+                _mems = getattr(message.channel, "members", None)
+                _grp = (not is_dm) and (len(_mems) > 2 if _mems else True)
                 reply = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda s=sender_id, b=body, imgs=images_param, cid=str(message.channel.id), grp=(not is_dm): _get_chat_response(config, s, b, discord_sessions, images=imgs, channel_id=cid, is_group=grp),
+                    lambda s=sender_id, b=body, imgs=images_param, cid=str(message.channel.id), grp=_grp: _get_chat_response(config, s, b, discord_sessions, images=imgs, channel_id=cid, is_group=grp),
                 )
             except Exception as e:
                 logger.exception("Discord KI-Antwort fehlgeschlagen: %s", e)
                 reply = f"Fehler bei der Verarbeitung: {e}"
+            finally:
+                _busy_users.discard(sender_id)
 
         if not reply:
             return

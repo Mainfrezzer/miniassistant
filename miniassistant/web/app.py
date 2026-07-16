@@ -136,11 +136,14 @@ def _client_ip(request: Request) -> str:
     trusted = (peer in trusted_proxies) if trusted_proxies else trust_forwarded
     if not trusted:
         return peer
-    return (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or request.headers.get("x-real-ip", "").strip()
-        or peer
-    )
+    # Walk XFF right-to-left: rightmost entry not in trusted_proxies is the real
+    # client (leftmost entries are client-supplied and spoofable).
+    xff = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    for entry in reversed(xff):
+        if trusted_proxies and entry in trusted_proxies:
+            continue
+        return entry
+    return request.headers.get("x-real-ip", "").strip() or peer
 
 # Auth Brute-Force Protection: separate Buckets für fehlgeschlagene Auth-Versuche (401)
 _auth_fail_buckets: dict[str, list[float]] = {}
@@ -362,9 +365,9 @@ async def _shutdown() -> None:
     global _chat_executor, _matrix_bot_task, _discord_bot_task, _telegram_bot_task, _session_cleanup_task, _slot_cache_cleanup_task
     if _chat_executor:
         _chat_executor.shutdown(wait=False)
+    _chat_executor = None
     if _slot_cache_cleanup_task:
         _slot_cache_cleanup_task.cancel()
-        _chat_executor = None
     if _session_cleanup_task and not _session_cleanup_task.done():
         _session_cleanup_task.cancel()
     for task in (_matrix_bot_task, _discord_bot_task, _telegram_bot_task):
@@ -388,6 +391,7 @@ _BODY_LIMIT_BY_PREFIX: list[tuple[str, int]] = [
     ("/api/chat/stream", _BODY_LIMIT_LARGE),
     ("/api/chat", _BODY_LIMIT_LARGE),
     ("/api/onboarding", _BODY_LIMIT_LARGE),
+    ("/api/voice", _BODY_LIMIT_LARGE),
     ("/v1/chat/completions", _BODY_LIMIT_LARGE),
     ("/v1/completions", _BODY_LIMIT_LARGE),
     ("/raw/v1/chat/completions", _BODY_LIMIT_LARGE),
@@ -406,7 +410,9 @@ def _body_limit_for_path(path: str) -> int:
 @app.middleware("http")
 async def _body_size_limit_middleware(request: Request, call_next):
     """Enforce per-path body-size cap via Content-Length header.
-    Chunked uploads without Content-Length: enforced post-hoc when first read."""
+    Requests with a body but WITHOUT Content-Length (chunked transfer) are rejected
+    with 411 — otherwise the cap could be bypassed entirely and an unbounded body
+    would be read into memory by request.json()."""
     method = request.method.upper()
     if method in ("GET", "HEAD", "DELETE", "OPTIONS"):
         return await call_next(request)
@@ -415,16 +421,20 @@ async def _body_size_limit_middleware(request: Request, call_next):
         return await call_next(request)
     limit = _body_limit_for_path(path)
     cl_raw = request.headers.get("content-length")
-    if cl_raw:
-        try:
-            cl = int(cl_raw)
-        except ValueError:
-            return JSONResponse(status_code=400, content={"detail": "invalid Content-Length"})
-        if cl > limit:
-            return JSONResponse(
-                status_code=413,
-                content={"detail": f"request body too large ({cl} bytes; limit {limit})"},
-            )
+    if not cl_raw:
+        return JSONResponse(
+            status_code=411,
+            content={"detail": "Content-Length required (chunked transfer not accepted)"},
+        )
+    try:
+        cl = int(cl_raw)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"detail": "invalid Content-Length"})
+    if cl > limit:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": f"request body too large ({cl} bytes; limit {limit})"},
+        )
     return await call_next(request)
 
 
@@ -637,10 +647,15 @@ async def index(request: Request):
     cfg = load_config()
     server_token = (cfg.get("server") or {}).get("token") or ""
     has_token = bool(server_token)
-    # Token aus Cookie oder URL für Anzeige
+    # Token aus Cookie oder URL für Anzeige. Timing-safe vergleichen und falsche
+    # Tokens als Auth-Failure zählen — sonst wäre "/" ein banfreies Rate-Orakel
+    # zum Token-Raten (200er-Antwort landet nicht im 401-Brute-Force-Tracker).
+    import secrets as _secrets_idx
     cookie_token = request.cookies.get("ma_token", "")
     effective_token = token or cookie_token
-    is_authed = effective_token and effective_token == server_token
+    is_authed = bool(effective_token and server_token and _secrets_idx.compare_digest(effective_token, server_token))
+    if effective_token and server_token and not is_authed:
+        _record_auth_failure(_client_ip(request))
     token_esc = _escape(effective_token) if effective_token else ""
     config_links = ""
     if has_token:
@@ -733,6 +748,40 @@ async def index(request: Request):
     return HTMLResponse(html)
 
 
+# Raw-YAML secret masking: mask = first 4 chars + "****" + 6 hex chars of
+# sha256(secret). The hash suffix makes each mask unique per secret so that
+# unmasking on save maps each mask back to exactly one original value
+# (plain "first4****" collided for keys sharing a 4-char prefix).
+_SECRET_YAML_RE = r'((?:api_key|token|bot_token|github_token|password|secret):\s*)(\S+)'
+
+
+def _mask_secret_value(value: str) -> str:
+    import hashlib
+    return value[:4] + "****" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:6]
+
+
+def _mask_secrets_raw(text: str) -> str:
+    import re
+    return re.sub(
+        _SECRET_YAML_RE,
+        lambda m: (m.group(1) + _mask_secret_value(m.group(2))) if len(m.group(2)) > 4 else m.group(0),
+        text,
+    )
+
+
+def _unmask_secrets_raw(content: str, original: str) -> str:
+    """Replace unique masks in edited content with their original secret values."""
+    import re
+    mask_map: dict[str, str] = {}
+    for m in re.finditer(_SECRET_YAML_RE, original):
+        val = m.group(2)
+        if len(val) > 4:
+            mask_map[_mask_secret_value(val)] = val
+    for mask, orig in mask_map.items():
+        content = content.replace(mask, orig)
+    return content
+
+
 @app.get("/config/raw", response_class=HTMLResponse)
 async def config_page(request: Request):
     """Config-Seite (Raw YAML): YAML in Textarea anzeigen, editierbar. Nur zugänglich mit gültigem Token (oder wenn noch keiner gesetzt)."""
@@ -742,11 +791,7 @@ async def config_page(request: Request):
     tq = _token_query(token)
     raw = load_config_raw()
     # Sensitive Werte maskieren (nur Anzeige, beim Speichern bleibt Original wenn nicht geändert)
-    import re
-    def _mask_secrets(text: str) -> str:
-        pattern = r'((?:api_key|token|bot_token|github_token|password|secret):\s*)(\S+)'
-        return re.sub(pattern, lambda m: m.group(1) + m.group(2)[:4] + '****' if len(m.group(2)) > 4 else m.group(0), text)
-    display_raw = _mask_secrets(raw)
+    display_raw = _mask_secrets_raw(raw)
     raw_b64 = base64.b64encode(display_raw.encode("utf-8")).decode("ascii")
     html = f"""
     <!DOCTYPE html>
@@ -1107,7 +1152,6 @@ async def config_form_page(request: Request):
         {{ n:"default_repo", t:"text", l:"Default-Repo (absoluter Pfad; Task kann eigenes repo übergeben)" }},
         {{ n:"max_concurrent", t:"int", l:"Max. gleichzeitige Jobs (Last/Kosten-Deckel)" }},
         {{ n:"max_runtime", t:"int", l:"Max. Laufzeit pro Job (s), danach Kill" }},
-        {{ n:"max_retries", t:"int", l:"Max. Auto-Retries (nur bei timeout/crash)" }},
         {{ n:"attach_url", t:"text", l:"Remote OpenCode-Server (leer = lokaler Subprocess; z. B. http://host:4096)" }},
     ]}},
     // Hinweis: opencode.presets (model/agent pro Preset) nur im Raw-YAML-Editor.
@@ -1853,12 +1897,6 @@ def _escape(s: str) -> str:
     return _html.escape(s, quote=True)
 
 
-def _js_escape(s: str) -> str:
-    """Für sichere Nutzung in JavaScript-Strings (z. B. in HTML)."""
-    import json
-    return json.dumps(s)
-
-
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_page(request: Request):
     """Chat-Seite: Markdown, Thinking optional in Spoiler, aufgehuebschtes Design."""
@@ -2468,63 +2506,10 @@ async def api_config_save(request: Request):
     body = await request.body()
     content = body.decode("utf-8", errors="replace")
     with _config_save_lock:
-        # Maskierte Secrets durch Originale ersetzen
+        # Maskierte Secrets durch Originale ersetzen (mask ist pro Secret eindeutig)
         if "****" in content:
             try:
-                original = load_config_raw()
-                import yaml
-                orig_data = yaml.safe_load(original) or {}
-                new_data = yaml.safe_load(content) or {}
-                # Provider api_keys
-                for prov_name, prov_cfg in (new_data.get("providers") or {}).items():
-                    if isinstance(prov_cfg, dict) and prov_cfg.get("api_key") and "****" in str(prov_cfg.get("api_key", "")):
-                        orig_key = ((orig_data.get("providers") or {}).get(prov_name) or {}).get("api_key")
-                        if orig_key:
-                            content = content.replace(str(prov_cfg["api_key"]), orig_key)
-                # server.token
-                new_srv = (new_data.get("server") or {}).get("token", "")
-                if new_srv and "****" in str(new_srv):
-                    orig_srv = (orig_data.get("server") or {}).get("token")
-                    if orig_srv:
-                        content = content.replace(str(new_srv), orig_srv)
-                # chat_clients.matrix.token
-                new_mx = ((new_data.get("chat_clients") or {}).get("matrix") or {}).get("token", "")
-                if new_mx and "****" in str(new_mx):
-                    orig_mx = ((orig_data.get("chat_clients") or {}).get("matrix") or {}).get("token")
-                    if orig_mx:
-                        content = content.replace(str(new_mx), orig_mx)
-                # chat_clients.discord.bot_token
-                new_dc = ((new_data.get("chat_clients") or {}).get("discord") or {}).get("bot_token", "")
-                if new_dc and "****" in str(new_dc):
-                    orig_dc = ((orig_data.get("chat_clients") or {}).get("discord") or {}).get("bot_token")
-                    if orig_dc:
-                        content = content.replace(str(new_dc), orig_dc)
-                # chat_clients.telegram.bot_token
-                new_tg = ((new_data.get("chat_clients") or {}).get("telegram") or {}).get("bot_token", "")
-                if new_tg and "****" in str(new_tg):
-                    orig_tg = ((orig_data.get("chat_clients") or {}).get("telegram") or {}).get("bot_token")
-                    if orig_tg:
-                        content = content.replace(str(new_tg), orig_tg)
-                # github_token (top-level)
-                new_gh = (new_data.get("github_token") or "")
-                if new_gh and "****" in str(new_gh):
-                    orig_gh = orig_data.get("github_token")
-                    if orig_gh:
-                        content = content.replace(str(new_gh), orig_gh)
-                # raw_proxy.token
-                new_rp = (new_data.get("raw_proxy") or {}).get("token", "")
-                if new_rp and "****" in str(new_rp):
-                    orig_rp = (orig_data.get("raw_proxy") or {}).get("token")
-                    if orig_rp:
-                        content = content.replace(str(new_rp), orig_rp)
-                # email.password in accounts
-                new_emails = (new_data.get("email") or {}).get("accounts") or {}
-                orig_emails = (orig_data.get("email") or {}).get("accounts") or {}
-                for acc_name, acc_cfg in new_emails.items():
-                    if isinstance(acc_cfg, dict) and acc_cfg.get("password") and "****" in str(acc_cfg.get("password", "")):
-                        orig_pass = (orig_emails.get(acc_name) or {}).get("password")
-                        if orig_pass:
-                            content = content.replace(str(acc_cfg["password"]), orig_pass)
+                content = _unmask_secrets_raw(content, load_config_raw())
             except Exception:
                 pass
         ok, err = validate_config_raw(content)
@@ -2826,7 +2811,7 @@ async def api_auth_platform(request: Request, platform: str):
         cfg = load_config(project_dir)
         config_dir = (cfg.get("_config_dir") or "").strip() or None
         # Rate-Limit pro Aufrufer-IP, sonst sperrt 5 Fehlversuche alle Web-Auth-Versuche.
-        _rk_ip = (request.client.host if request.client else "unknown")
+        _rk_ip = _client_ip(request)
         result = consume_code(code, config_dir=config_dir, rate_key=_rk_ip)
         if result:
             plat, uid = result
@@ -2943,6 +2928,10 @@ def _get_chats_dir(config: dict) -> Path:
     return config_path().parent / "chats"
 
 
+# Serializes read-modify-write on chat JSON files (title thread vs. exchange save).
+_chat_file_lock = threading.Lock()
+
+
 def _generate_title_bg(session: dict, user_msg: str) -> None:
     """Hintergrundthread: generiert per LLM einen kurzen Titel und schreibt ihn ins JSON."""
     import threading, json as _json
@@ -2965,10 +2954,11 @@ def _generate_title_bg(session: dict, user_msg: str) -> None:
                 title = title[:50] + "…"
             if title:
                 fpath = Path(session["_chat_file"])
-                if fpath.exists():
-                    data = _json.loads(fpath.read_text(encoding="utf-8"))
-                    data["title"] = title
-                    fpath.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                with _chat_file_lock:
+                    if fpath.exists():
+                        data = _json.loads(fpath.read_text(encoding="utf-8"))
+                        data["title"] = title
+                        fpath.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
     threading.Thread(target=_do, daemon=True).start()
@@ -2980,27 +2970,43 @@ def _save_chat_to_file(session: dict, user_msg: str, assistant_msg: str) -> None
     chats_dir = _get_chats_dir(session["config"])
     chats_dir.mkdir(parents=True, exist_ok=True)
     is_first = "_chat_file" not in session
-    if is_first:
-        now = datetime.datetime.now()
-        stem = now.strftime("%Y-%m-%d_%H%M%S")
-        fpath = chats_dir / (stem + ".json")
-        data = {
-            "title": user_msg[:60].replace("\n", " ").strip(),
-            "model": session.get("model") or "",
-            "created": now.isoformat(),
-            "messages": [],
-            "exchanges": [],
-        }
-        session["_chat_file"] = str(fpath)
-        session["_chat_stem"] = stem
-    else:
-        fpath = Path(session["_chat_file"])
-        data = _json.loads(fpath.read_text(encoding="utf-8"))
-    data["messages"] = session.get("messages", [])
-    data["exchanges"] = data.get("exchanges", []) + [{"user": user_msg, "assistant": assistant_msg}]
-    fpath.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    with _chat_file_lock:
+        if is_first:
+            now = datetime.datetime.now()
+            stem = now.strftime("%Y-%m-%d_%H%M%S")
+            fpath = chats_dir / (stem + ".json")
+            data = {
+                "title": user_msg[:60].replace("\n", " ").strip(),
+                "model": session.get("model") or "",
+                "created": now.isoformat(),
+                "messages": [],
+                "exchanges": [],
+            }
+            session["_chat_file"] = str(fpath)
+            session["_chat_stem"] = stem
+        else:
+            fpath = Path(session["_chat_file"])
+            data = _json.loads(fpath.read_text(encoding="utf-8"))
+        data["messages"] = session.get("messages", [])
+        data["exchanges"] = data.get("exchanges", []) + [{"user": user_msg, "assistant": assistant_msg}]
+        fpath.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
     if is_first:
         _generate_title_bg(session, user_msg)
+
+
+def _handle_user_input_locked(session_id: str, session: dict, message: str):
+    """handle_user_input unter dem Per-Session-Lock (im Executor-Thread aufrufen).
+    None = Session ist beschäftigt (Lock nicht bekommen)."""
+    lock = _get_session_lock(session_id)
+    if not lock.acquire(timeout=5.0):
+        return None
+    try:
+        return handle_user_input(session, message)
+    finally:
+        lock.release()
+
+
+_SESSION_BUSY_MSG = "Modell arbeitet noch — warte bis die Antwort fertig ist, oder sende /abort zum Abbrechen."
 
 
 def _chat_stream_generator(session_id: str, session: dict, message: str, images: list | None = None):
@@ -3008,7 +3014,7 @@ def _chat_stream_generator(session_id: str, session: dict, message: str, images:
     lock = _get_session_lock(session_id)
     if not lock.acquire(timeout=5.0):
         import json as _json
-        yield _json.dumps({"type": "done", "session_id": session_id, "content": "", "error": "Modell arbeitet noch — warte bis die Antwort fertig ist, oder sende /abort zum Abbrechen."}, ensure_ascii=False) + "\n"
+        yield _json.dumps({"type": "done", "session_id": session_id, "content": "", "error": _SESSION_BUSY_MSG}, ensure_ascii=False) + "\n"
         return
     try:
         yield from _chat_stream_generator_locked(session_id, session, message, images=images)
@@ -3204,7 +3210,11 @@ async def api_chat_stream(request: Request):
         # Run in threadpool to avoid blocking event loop during model pulls
         loop = asyncio.get_event_loop()
         executor = _chat_executor
-        result = await loop.run_in_executor(executor, lambda: handle_user_input(session, message))
+        result = await loop.run_in_executor(executor, lambda: _handle_user_input_locked(session_id, session, message))
+        if result is None:
+            import json as _json
+            one = _json.dumps({"type": "done", "session_id": session_id, "content": "", "error": _SESSION_BUSY_MSG}, ensure_ascii=False) + "\n"
+            return StreamingResponse(iter([one]), media_type="application/x-ndjson")
         session = result[1]
         _sessions[session_id] = session
         thinking = result[3] if len(result) > 3 else None
@@ -3325,6 +3335,12 @@ async def api_chat(request: Request):
     session["chat_context"]["user_id"] = f"web:{session_id}"
     session["config"].setdefault("_chat_context", {})["user_id"] = f"web:{session_id}"
     session["config"]["_chat_context"]["platform"] = "web"
+    # Geräte-Clients (z.B. Echo Show) schicken device_id mit → device_action-Tool verfügbar
+    if body.get("device_id"):
+        session["config"]["_chat_context"]["device_id"] = str(body["device_id"])
+        session["config"]["_chat_context"]["user_id"] = f"show:{body['device_id']}"
+    else:
+        session["config"]["_chat_context"].pop("device_id", None)
     if session.get("_track_chat"):
         from miniassistant.slot_cache import derive_conv_id as _sc_derive
         _conv = _sc_derive("web", session_id=session_id)
@@ -3334,7 +3350,25 @@ async def api_chat(request: Request):
     else:
         session["config"]["_chat_context"].pop("conv_id", None)
 
-    result = await loop.run_in_executor(executor, lambda: handle_user_input(session, message))
+    if body.get("device_id"):
+        from miniassistant import device_intents as _di
+        _fast = _di.match(message)
+        if _fast is not None:
+            _actions, _reply = _fast
+            return JSONResponse({
+                "response": _reply, "session_id": session_id, "device_actions": _actions,
+            })
+        message = (
+            f"{message}\n"
+            "[System directive: This request comes from the user's smart-display device "
+            f"('{body['device_id']}'). You CAN control it with the device_action tool "
+            "(open_app, media, volume, play_url, stop_playback) — use it directly when the "
+            "user asks to open an app, play or control music, or change the volume. "
+            "No ADB or exec needed.]"
+        )
+    result = await loop.run_in_executor(executor, lambda: _handle_user_input_locked(session_id, session, message))
+    if result is None:
+        raise HTTPException(status_code=429, detail=_SESSION_BUSY_MSG)
     response_text = result[0]
     session = result[1]
     debug_info = result[2] if len(result) > 2 else None
@@ -3342,13 +3376,196 @@ async def api_chat(request: Request):
     content = result[4] if len(result) > 4 else None
     switch_info = result[5] if len(result) > 5 else None
     _sessions[session_id] = session
-    out = {"response": content if content is not None else response_text, "session_id": session_id}
+    _resp_text = content if content is not None else response_text
+    device_actions = session["config"].pop("_pending_device_actions", None)
+    if body.get("device_id"):
+        # Bilder aus dem Content lösen → images-Array für den Geräte-Client
+        import re as _re_img
+        _dev_images: list[dict] = []
+
+        def _grab(m: "_re_img.Match") -> str:
+            _dev_images.append({"url": m.group(2), "caption": (m.group(1) or "Bild").strip()})
+            return ""
+
+        _resp_text = _re_img.sub(
+            r"!\[([^\]]*)\]\((/api/(?:workspace/raw|img)[^)]*)\)", _grab, _resp_text or ""
+        ).strip()
+    out = {"response": _resp_text, "session_id": session_id}
+    if device_actions:
+        out["device_actions"] = device_actions
+    if body.get("device_id") and _dev_images:
+        out["images"] = _dev_images
     if thinking:
         out["thinking"] = thinking
     if switch_info:
         out["model_switched"] = switch_info  # {"model": "...", "reason": "..."} für Anzeige z.B. "Wechsel zu X (Grund: …)"
     if debug_info is not None:
         out["_debug"] = debug_info
+    return JSONResponse(out)
+
+
+@app.post("/api/voice/chat")
+async def api_voice_chat(request: Request):
+    """Voice-Chat für Geräte-Clients (z.B. Echo Show / Wandpanel).
+
+    POST { audio_b64 (WAV, 16 kHz mono PCM16 empfohlen), session_id?, device_id?,
+           tts?: bool = true, language? }
+    → { transcript, response, voice_text, visual, audio_b64?, session_id }
+
+    Pipeline: STT (Wyoming) → Agent (wie /api/chat) → format_for_voice → TTS (Wyoming/HTTP).
+    """
+    import base64
+
+    from miniassistant.config import (
+        get_voice_language,
+        get_voice_stt_url,
+        get_voice_tts_language,
+        get_voice_tts_model,
+        get_voice_tts_options,
+        get_voice_tts_url,
+        get_voice_tts_voice,
+    )
+    from miniassistant import wyoming_client as _wyoming
+    from miniassistant.voice_format import format_for_voice
+
+    _require_token(request)
+    body = await request.json()
+    audio_b64 = body.get("audio_b64") or ""
+    if not audio_b64:
+        raise HTTPException(status_code=400, detail="audio_b64 required")
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="audio_b64 invalid")
+
+    session_id = body.get("session_id") or ""
+    if session_id and session_id in _sessions:
+        session = _sessions[session_id]
+    else:
+        session_id = str(uuid.uuid4())
+        project_dir = getattr(request.app.state, "project_dir", None)
+        session = create_session(None, project_dir)
+        _sessions[session_id] = session
+    _session_last_access[session_id] = time.time()
+    config = session["config"]
+
+    stt_url = get_voice_stt_url(config)
+    if not stt_url:
+        raise HTTPException(status_code=503, detail="voice.stt.url nicht konfiguriert")
+    lang = body.get("language") or get_voice_language(config)
+    loop = asyncio.get_event_loop()
+    try:
+        transcript = await loop.run_in_executor(
+            None, lambda: _wyoming.transcribe(audio_bytes, stt_url, language=lang)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"STT fehlgeschlagen: {e}")
+    if not transcript:
+        return JSONResponse({"transcript": "", "response": "", "voice_text": "",
+                             "visual": "", "session_id": session_id})
+
+    device_id = str(body.get("device_id") or session_id)
+    session.setdefault("chat_context", {})["platform"] = "web"
+    session["chat_context"]["user_id"] = f"show:{device_id}"
+    session["config"].setdefault("_chat_context", {})["user_id"] = f"show:{device_id}"
+    session["config"]["_chat_context"]["platform"] = "web"
+    session["config"]["_chat_context"]["device_id"] = device_id
+    session["config"]["_chat_context"].pop("conv_id", None)
+
+    # Fast-Path: eindeutige Gerätebefehle deterministisch matchen (der 35B ruft
+    # device_action unzuverlässig auf). Spart Modell-Runde + garantiert die Aktion.
+    from miniassistant import device_intents as _di
+    _fast = _di.match(transcript)
+    if _fast is not None:
+        _actions, _reply = _fast
+        _vt, _vis = format_for_voice(_reply)
+        _out: dict = {
+            "transcript": transcript, "response": _reply, "voice_text": _vt,
+            "visual": _vis, "session_id": session_id, "device_actions": _actions,
+        }
+        _tts = get_voice_tts_url(config)
+        if body.get("tts", True) and _tts and _vt:
+            try:
+                _out["audio_b64"] = base64.b64encode(await loop.run_in_executor(
+                    None, lambda: _wyoming.synthesize(
+                        _vt, _tts, voice=get_voice_tts_voice(config),
+                        model=get_voice_tts_model(config), language=get_voice_tts_language(config),
+                        **get_voice_tts_options(config),
+                    )
+                )).decode()
+            except Exception:
+                _log.exception("Voice-Chat Fast-Path: TTS fehlgeschlagen")
+        return JSONResponse(_out)
+
+    # Harte Direktive nötig: VOICE.md sagt dem Agenten sonst "antworte via send_audio,
+    # keine Text-Antwort" — das Audio liefe beim Geräte-Client ins Leere.
+    wrapped = (
+        f"[Voice] {transcript}\n"
+        "[System directive: This request comes from the user's smart-display device "
+        f"('{device_id}'). Reply with PLAIN TEXT ONLY in short spoken language (apply the "
+        "VOICE.md rewrite rules to your text). Do NOT call send_audio — the device converts "
+        "your text reply to speech itself. Do NOT generate TTS files or embed audio/HTML tags. "
+        "DEVICE CONTROL: To open an app, play/pause/skip music, change volume, or play a "
+        "stream, call the device_action tool. Example: to open NewPipe, call device_action with "
+        '{\"action\":\"open_app\",\"arg\":\"org.schabi.newpipe\"}. FORBIDDEN for device control: '
+        "exec, curl, adb, ssh, filesystem — the device has NO shell, ONLY the device_action "
+        "tool reaches it. Using exec for this WILL fail. If the request isn't device control, ignore this.]"
+    )
+    result = await loop.run_in_executor(
+        _chat_executor, lambda: _handle_user_input_locked(session_id, session, wrapped)
+    )
+    if result is None:
+        raise HTTPException(status_code=429, detail=_SESSION_BUSY_MSG)
+    response_text = result[0]
+    session = result[1]
+    _sessions[session_id] = session
+    content = result[4] if len(result) > 4 else None
+    response = content if content is not None else response_text
+
+    # Bilder aus dem Content lösen (chat_round injiziert send_image als Markdown
+    # ![caption](/api/workspace/raw?...)) → als images-Array an die App, aus Text raus.
+    import re as _re
+    _images: list[dict] = []
+
+    def _grab_img(m: "_re.Match") -> str:
+        _images.append({"url": m.group(2), "caption": (m.group(1) or "Bild").strip()})
+        return ""
+
+    response = _re.sub(r"!\[([^\]]*)\]\((/api/(?:workspace/raw|img)[^)]*)\)", _grab_img, response or "")
+    # Agent bettet ggf. selbst <audio>/<img>-Tags ein (WebUI-Muster) — auf dem
+    # Gerät nutzlos, und TTS würde den Tag vorlesen.
+    response = _re.sub(r"<audio\b[^>]*>.*?</audio>", "", response, flags=_re.S | _re.I)
+    response = _re.sub(r"<(?:audio|img|video|source)\b[^>]*/?>", "", response, flags=_re.I)
+    response = _re.sub(r"\n{3,}", "\n\n", response).strip()
+
+    voice_text, visual_content = format_for_voice(response)
+    out: dict = {
+        "transcript": transcript,
+        "response": response or "",
+        "voice_text": voice_text,
+        "visual": visual_content,
+        "session_id": session_id,
+    }
+    device_actions = session["config"].pop("_pending_device_actions", None)
+    if device_actions:
+        out["device_actions"] = device_actions
+    if _images:
+        out["images"] = _images
+    tts_url = get_voice_tts_url(config)
+    if body.get("tts", True) and tts_url and voice_text:
+        try:
+            wav_bytes = await loop.run_in_executor(
+                None, lambda: _wyoming.synthesize(
+                    voice_text, tts_url,
+                    voice=get_voice_tts_voice(config),
+                    model=get_voice_tts_model(config),
+                    language=get_voice_tts_language(config),
+                    **get_voice_tts_options(config),
+                )
+            )
+            out["audio_b64"] = base64.b64encode(wav_bytes).decode()
+        except Exception:
+            _log.exception("Voice-Chat: TTS fehlgeschlagen")
     return JSONResponse(out)
 
 
@@ -3607,10 +3824,10 @@ def _is_save_request(message: str) -> bool:
 
 def _save_onboarding_files(files: dict[str, str], config: dict[str, Any]) -> dict[str, Any]:
     """Speichert die vier Agent-Dateien und setzt onboarding_complete. Returns {'ok': True} oder {'error': ...}."""
-    agent_dir = Path(config.get("agent_dir") or "")
-    if not agent_dir:
+    _ad_raw = config.get("agent_dir") or ""
+    if not _ad_raw:
         return {"error": "agent_dir not configured"}
-    agent_dir = Path(agent_dir).expanduser().resolve()
+    agent_dir = Path(_ad_raw).expanduser().resolve()
     agent_dir.mkdir(parents=True, exist_ok=True)
     for name in ("SOUL.md", "IDENTITY.md", "TOOLS.md", "USER.md"):
         content = files.get(name)
@@ -5032,7 +5249,10 @@ async def api_workspace_files(request: Request):
     """Listet Dateien/Ordner im Workspace-Verzeichnis."""
     _require_token(request)
     config = load_config()
-    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    _ws_raw = config.get("workspace") or ""
+    if not _ws_raw:
+        raise HTTPException(status_code=503, detail="workspace nicht konfiguriert")
+    workspace = Path(_ws_raw).expanduser().resolve()
     rel = request.query_params.get("path", "").strip().lstrip("/")
     target = (workspace / rel).resolve()
     if not _is_path_within(target, workspace):
@@ -5068,7 +5288,10 @@ async def api_workspace_file(request: Request):
     """Liefert den Inhalt einer Datei im Workspace."""
     _require_token(request)
     config = load_config()
-    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    _ws_raw = config.get("workspace") or ""
+    if not _ws_raw:
+        raise HTTPException(status_code=503, detail="workspace nicht konfiguriert")
+    workspace = Path(_ws_raw).expanduser().resolve()
     rel = request.query_params.get("path", "").strip().lstrip("/")
     target = (workspace / rel).resolve()
     if not _is_path_within(target, workspace):
@@ -5097,7 +5320,10 @@ async def api_serve_generated_image(img_name: str, request: Request):
     """Liefert ein generiertes Bild aus workspace/images/."""
     _require_token(request)
     config = load_config()
-    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    _ws_raw = config.get("workspace") or ""
+    if not _ws_raw:
+        raise HTTPException(status_code=503, detail="workspace nicht konfiguriert")
+    workspace = Path(_ws_raw).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=404)
     _mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -5120,7 +5346,10 @@ async def api_serve_audio(audio_name: str, request: Request):
     """Liefert eine generierte Audio-Datei aus workspace/audio/."""
     _require_token(request)
     config = load_config()
-    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    _ws_raw = config.get("workspace") or ""
+    if not _ws_raw:
+        raise HTTPException(status_code=503, detail="workspace nicht konfiguriert")
+    workspace = Path(_ws_raw).expanduser().resolve()
     if not workspace.is_dir():
         raise HTTPException(status_code=404)
     # audio_name kann mit oder ohne .wav kommen
@@ -5142,7 +5371,10 @@ async def api_workspace_raw(request: Request):
     """Liefert eine Datei als Binary (für Bilder)."""
     _require_token(request)
     config = load_config()
-    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    _ws_raw = config.get("workspace") or ""
+    if not _ws_raw:
+        raise HTTPException(status_code=503, detail="workspace nicht konfiguriert")
+    workspace = Path(_ws_raw).expanduser().resolve()
     rel = request.query_params.get("path", "").strip().lstrip("/")
     target = (workspace / rel).resolve()
     if not _is_path_within(target, workspace):
@@ -5164,7 +5396,10 @@ async def api_workspace_delete(request: Request):
     if not rel:
         return JSONResponse({"error": "Kein Pfad angegeben"})
     config = load_config()
-    workspace = Path(config.get("workspace") or "").expanduser().resolve()
+    _ws_raw = config.get("workspace") or ""
+    if not _ws_raw:
+        raise HTTPException(status_code=503, detail="workspace nicht konfiguriert")
+    workspace = Path(_ws_raw).expanduser().resolve()
     target = (workspace / rel).resolve()
     if not _is_path_within(target, workspace):
         raise HTTPException(status_code=403, detail="Pfad außerhalb des Workspace")
@@ -7040,7 +7275,7 @@ def _collect_rooms_and_channels(config: dict) -> dict:
             matrix_rooms.append({**r, "mode": mode, "is_default": not room_modes.get(r["id"]),
                                  "settings": _settings_for(room_settings, r["id"], r.get("members", 0))})
     except Exception as e:
-        logger.warning("list_joined_rooms failed: %s", e)
+        _log.warning("list_joined_rooms failed: %s", e)
     try:
         from miniassistant.discord_bot import list_channels
         for c in list_channels():
@@ -7051,7 +7286,7 @@ def _collect_rooms_and_channels(config: dict) -> dict:
             discord_channels.append({**c, "mode": mode, "is_default": not channel_modes.get(c["id"]),
                                      "settings": _settings_for(channel_settings, c["id"], members_proxy)})
     except Exception as e:
-        logger.warning("list_channels failed: %s", e)
+        _log.warning("list_channels failed: %s", e)
     try:
         from miniassistant.telegram_bot import list_chats
         for c in list_chats():
@@ -7062,7 +7297,7 @@ def _collect_rooms_and_channels(config: dict) -> dict:
             telegram_chats.append({**c, "mode": mode, "is_default": not chat_modes.get(c["id"]),
                                    "settings": _settings_for(chat_settings, c["id"], members_proxy)})
     except Exception as e:
-        logger.warning("telegram list_chats failed: %s", e)
+        _log.warning("telegram list_chats failed: %s", e)
 
     seen_matrix = {r["id"] for r in matrix_rooms}
     for rid, mode in room_modes.items():
@@ -7130,7 +7365,7 @@ async def api_rooms_leave(request: Request):
                         section.pop("room_modes", None)
                     save_config(config)
             except Exception as e:
-                logger.warning("leave: mode cleanup failed: %s", e)
+                _log.warning("leave: mode cleanup failed: %s", e)
         return JSONResponse({"ok": ok, "message": msg or ("ok" if ok else "leave failed (no detail from matrix server)")})
     if kind == "discord_guild":
         try:
@@ -7156,7 +7391,7 @@ async def api_rooms_leave(request: Request):
                         section.pop("chat_modes", None)
                     save_config(config)
             except Exception as e:
-                logger.warning("telegram leave: mode cleanup failed: %s", e)
+                _log.warning("telegram leave: mode cleanup failed: %s", e)
         return JSONResponse({"ok": ok, "message": msg or ("ok" if ok else "leave failed")})
     raise HTTPException(status_code=400, detail="kind must be 'matrix', 'discord_guild' or 'telegram'")
 

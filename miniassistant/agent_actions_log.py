@@ -69,19 +69,6 @@ def _log_paths(config: dict[str, Any]) -> list[Path]:
     return paths
 
 
-def _log_path(config: dict[str, Any]) -> Path | None:
-    """Deprecated: legacy helper. Returns main log only (group-room tee handled by _log_paths)."""
-    paths = _log_paths(config)
-    return paths[0] if paths else None
-
-
-def _write(path: Path, text: str) -> None:
-    with _lock:
-        _rotate_if_needed(path)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(text)
-
-
 def _write_all(paths: list[Path], text: str) -> None:
     """Schreibt denselben Text in alle Pfade (Tee). Lock einmal halten für atomare Reihenfolge."""
     if not paths:

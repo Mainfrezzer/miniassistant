@@ -10,6 +10,7 @@ Auth: Optional über raw_proxy.token (wenn konfiguriert), sonst ohne Auth.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -125,11 +126,8 @@ def _get_provider_for_model(config: dict[str, Any], model_id: str) -> tuple[str 
 
 def _get_provider_url_and_key(provider_cfg: dict[str, Any]) -> tuple[str, str | None]:
     """Extrahiert base_url und api_key aus Provider-Konfiguration."""
-    base_url = provider_cfg.get("base_url", "https://api.openai.com")
-    # base_url kann /v1 enthalten oder nicht
-    if not base_url.endswith("/"):
-        base_url += "/"
-    base_url = base_url.rstrip("/")  # Slash entfernen fuer saubere URL-Konstruktion
+    # base_url kann /v1 enthalten oder nicht; Slash entfernen fuer saubere URL-Konstruktion
+    base_url = str(provider_cfg.get("base_url", "https://api.openai.com")).rstrip("/")
     api_key = provider_cfg.get("api_key")
     return base_url, api_key
 
@@ -261,12 +259,25 @@ async def chat_completions(request: Request):
             _KEEPALIVE_SSE = 'data: {"choices":[{"delta":{},"index":0,"finish_reason":null}]}\n\n'
 
             def _upstream():
-                """Sync-Generator: streamt vom Provider (Context bleibt offen)."""
-                with httpx.Client(timeout=_timeout) as client:
-                    with client.stream("POST", url, headers=headers, json=body) as r:
-                        r.raise_for_status()
-                        for chunk in r.iter_text():
-                            yield chunk
+                """Sync-Generator: streamt vom Provider (Context bleibt offen).
+                Fehler als SSE-Error-Chunk emittieren — die Response ist zu dem
+                Zeitpunkt schon 200/gestartet, eine Exception ginge sonst unter."""
+                try:
+                    with httpx.Client(timeout=_timeout) as client:
+                        with client.stream("POST", url, headers=headers, json=body) as r:
+                            if r.status_code >= 400:
+                                r.read()
+                                _log.error("Raw proxy upstream error: %s %s", r.status_code, r.text[:200])
+                                err = {"error": {"message": r.text[:500] or f"upstream status {r.status_code}",
+                                                 "type": "upstream_error", "code": r.status_code}}
+                                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+                                return
+                            for chunk in r.iter_text():
+                                yield chunk
+                except Exception as e:
+                    _log.error("Raw proxy stream error: %s", e)
+                    err = {"error": {"message": str(e), "type": "server_error"}}
+                    yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
 
             def _stream_with_keepalive():
                 for item in _iter_with_keepalive(_upstream):
@@ -347,16 +358,17 @@ async def completions(request: Request):
     base_url, api_key = _get_provider_url_and_key(prov_cfg)
     _b = base_url.rstrip("/")
     url = f"{_b}/completions" if _b.endswith("/v1") else f"{_b}/v1/completions"
-    
+
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    
-    # Modell-Name für Usage auflösen (Alias → echt)
+
+    # Modell-Name auflösen (Alias → echt) und wie bei chat/completions in den Body schreiben
     aliases = (prov_cfg.get("models") or {}).get("aliases") or {}
     resolved_model = aliases.get(model, model)
     if "/" in resolved_model:
         resolved_model = resolved_model.split("/", 1)[-1]
+    body = {**body, "model": resolved_model}
 
     from miniassistant.web.app import _chat_executor
     _t0 = time.monotonic()

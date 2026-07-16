@@ -41,6 +41,8 @@ DEFAULT_GROUP_TOOLS = ("web_search", "read_url", "check_url", "send_image", "rea
 # Reset bei Restart und Datumswechsel — bewusst keine Persistenz (Limit ist Spam-Bremse,
 # kein Abrechnungssystem).
 _daily_counts: dict[tuple[str, str], tuple[str, int]] = {}
+# Tag an dem der User zuletzt über das Limit informiert wurde (notify-once pro Tag).
+_daily_notified: dict[tuple[str, str], str] = {}
 
 
 def check_user_daily_limit(config: dict[str, Any], platform: str, target_id: str | None, sender: str) -> tuple[bool, bool, int | None]:
@@ -67,9 +69,13 @@ def check_user_daily_limit(config: dict[str, Any], platform: str, target_id: str
     day, cnt = _daily_counts.get(key, (today, 0))
     if day != today:
         cnt = 0
-    _daily_counts[key] = (today, cnt + 1)
     if cnt >= limit:
-        return False, cnt == limit, None
+        # Rejected messages are NOT counted; notify only once per day.
+        notify = _daily_notified.get(key) != today
+        if notify:
+            _daily_notified[key] = today
+        return False, notify, None
+    _daily_counts[key] = (today, cnt + 1)
     remaining = limit - (cnt + 1)
     return True, False, remaining if (warn > 0 and remaining <= warn) else None
 
@@ -129,6 +135,11 @@ def build_group_chat_context(
     """
     ctx = dict(base_ctx)
     context_mode = (room_settings.get("context") or "agent").strip().lower()
+    # Sprache + Raum-Modell gelten für JEDEN Kontext-Modus (auch agent) — der frühere
+    # Early-Return hat beide für Agent-Räume verschluckt (Raum-Settings ignoriert).
+    lang = (room_settings.get("language") or "auto").strip().lower()
+    ctx["language_override"] = lang if lang and lang != "auto" else None
+    ctx["room_model"] = str(room_settings.get("model") or "").strip()
     if context_mode != "group":
         ctx["group_mode"] = False
         return ctx
@@ -148,9 +159,6 @@ def build_group_chat_context(
         raw_models = []
     ctx["group_models_allow"] = [str(m).strip() for m in raw_models if isinstance(m, str) and str(m).strip()]
     ctx["group_model"] = (str(room_settings.get("model") or "").strip()) if ctx["group_model_switch"] else ""
-    # Sprache: 'auto' (None) | 'de' | 'en' | ...
-    lang = (room_settings.get("language") or "auto").strip().lower()
-    ctx["language_override"] = lang if lang and lang != "auto" else None
     # Workspace-Subdir explizit oder aus room_id/channel_id ableiten
     sub = (room_settings.get("workspace_subdir") or "").strip()
     if not sub:
@@ -273,7 +281,8 @@ def format_auto_context(messages: list[dict[str, Any]], max_chars: int, bot_send
     # kann das Modell auch nicht als altes Thema wieder aufgreifen.
     if max_age_min > 0:
         _cutoff_ms = (now.timestamp() - max_age_min * 60) * 1000
-        messages = [m for m in messages if (m.get("ts") or 0) >= _cutoff_ms]
+        # ts==0 → age unknown → keep (don't drop untimestamped messages)
+        messages = [m for m in messages if not m.get("ts") or m["ts"] >= _cutoff_ms]
         if not messages:
             return ""
     today = now.date()

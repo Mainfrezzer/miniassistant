@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +27,41 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 _scheduler: Any = None
+_jobs_lock = threading.Lock()  # guards read-modify-write on schedules.json
+
+
+def _cron_dow_to_aps(field: str) -> str:
+    """Convert crontab day-of-week numbers (0/7=Sun) to APScheduler (0=Mon).
+    Numeric tokens (incl. ranges, steps, wrap-around like '5-1', '*/2') are fully
+    expanded to an explicit converted day list — a plain offset on '*/2' or a
+    wrapped range would silently hit the wrong days. Name tokens pass through."""
+    field = (field or "*").strip()
+    if field in ("", "*"):
+        return "*"
+    days: set[int] = set()
+    passthrough: list[str] = []
+    for tok in field.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = re.fullmatch(r"(\d+|\*)(?:-(\d+))?(?:/(\d+))?", tok)
+        if not m:
+            passthrough.append(tok)  # mon, fri, mon-fri
+            continue
+        start_s, end_s, step_s = m.groups()
+        step = max(1, int(step_s)) if step_s else 1
+        if start_s == "*":
+            start, end = 0, 6
+        else:
+            start = int(start_s) % 7  # cron: 7 == 0 == Sunday
+            end = (int(end_s) % 7) if end_s is not None else start
+        seq = [start]
+        while seq[-1] != end and len(seq) <= 7:
+            seq.append((seq[-1] + 1) % 7)
+        days.update(seq[::step])
+    out = [str((d + 6) % 7) for d in sorted(days)]
+    out.extend(passthrough)
+    return ",".join(out) if out else "*"
 
 # Responses the scheduler treats as "do not deliver to chat".
 # [WATCH:PENDING] → watch job condition not yet met.
@@ -132,24 +168,26 @@ def _run_scheduled_job(job_id: str, job_data: str) -> None:
 
 def _set_last_fired(job_id: str, ts: str) -> None:
     """Setzt last_fired für einen Job. No-op wenn Job nicht gefunden."""
-    jobs = _load_jobs()
-    for j in jobs:
-        if j.get("id") == job_id:
-            j["last_fired"] = ts
-            try:
-                _save_jobs(jobs)
-            except Exception:
-                pass
-            return
+    with _jobs_lock:
+        jobs = _load_jobs()
+        for j in jobs:
+            if j.get("id") == job_id:
+                j["last_fired"] = ts
+                try:
+                    _save_jobs(jobs)
+                except Exception:
+                    pass
+                return
 
 
 def _remove_job_by_id(job_id: str) -> None:
     """Entfernt einen Job aus schedules.json und dem Scheduler. Räumt Watch-State-Dateien auf."""
-    jobs = _load_jobs()
-    remaining = [j for j in jobs if j.get("id") != job_id]
-    if len(remaining) < len(jobs):
-        _save_jobs(remaining)
-        logger.info("Job %s entfernt", job_id[:8])
+    with _jobs_lock:
+        jobs = _load_jobs()
+        remaining = [j for j in jobs if j.get("id") != job_id]
+        if len(remaining) < len(jobs):
+            _save_jobs(remaining)
+            logger.info("Job %s entfernt", job_id[:8])
     sched = get_scheduler()
     if sched:
         try:
@@ -199,7 +237,7 @@ def _run_prompt(
             config["_lazy_scan_extra"] = "\n".join(extra_parts)
     # Scheduled Tasks: höherer Timeout — Tool-Chains können lange dauern,
     # kein User wartet interaktiv. Default 3600s (1h), überschreibbar via schedule_timeout.
-    config["api_timeout"] = float(config.get("schedule_timeout") or config.get("api_timeout") or 3600)
+    config["api_timeout"] = float(config.get("schedule_timeout") or 3600)
     session = create_session(config, None)
     # Chat-Kontext setzen, damit Tools (send_image, send_audio) den richtigen
     # Ziel-Raum/Channel kennen und nicht in _pending_images verschwinden.
@@ -357,7 +395,6 @@ def add_scheduled_job(
         job_data_dict["channel_id"] = channel_id
     job_data_json = json.dumps(job_data_dict, ensure_ascii=False)
 
-    jobs = _load_jobs()
     job_entry: dict[str, Any] = {
         "id": job_id,
         "trigger": trigger_type,
@@ -383,14 +420,16 @@ def add_scheduled_job(
         job_entry["room_id"] = room_id
     if channel_id:
         job_entry["channel_id"] = channel_id
-    jobs.append(job_entry)
-    _save_jobs(jobs)
+    with _jobs_lock:
+        jobs = _load_jobs()
+        jobs.append(job_entry)
+        _save_jobs(jobs)
 
-    try:
-        _add_to_scheduler(sched, job_id, trigger_type, trigger_args, job_data_json)
-    except Exception as e:
-        _save_jobs([j for j in jobs if j["id"] != job_id])
-        return False, str(e)
+        try:
+            _add_to_scheduler(sched, job_id, trigger_type, trigger_args, job_data_json)
+        except Exception as e:
+            _save_jobs([j for j in jobs if j["id"] != job_id])
+            return False, str(e)
 
     desc = []
     if prompt:
@@ -427,7 +466,7 @@ def _add_to_scheduler(sched: Any, job_id: str, trigger_type: str, trigger_args: 
                 hour=trigger_args.get("hour", "*"),
                 day=trigger_args.get("day", "*"),
                 month=trigger_args.get("month", "*"),
-                day_of_week=trigger_args.get("day_of_week", "*"),
+                day_of_week=_cron_dow_to_aps(trigger_args.get("day_of_week", "*")),
             ),
             id=job_id, args=job_args, replace_existing=True,
         )
@@ -439,7 +478,8 @@ def start_scheduler_if_enabled() -> bool:
     if not sched:
         return False
     now = datetime.now().astimezone()
-    jobs = _load_jobs()
+    with _jobs_lock:
+        jobs = _load_jobs()
     expired_ids: list[str] = []
     for job in jobs:
         jid = job.get("id")
@@ -482,10 +522,10 @@ def start_scheduler_if_enabled() -> bool:
             continue
     # Abgelaufene Jobs aus schedules.json entfernen
     if expired_ids:
-        remaining = [j for j in jobs if j.get("id") not in expired_ids]
-        _save_jobs(remaining)
+        with _jobs_lock:
+            remaining = [j for j in _load_jobs() if j.get("id") not in expired_ids]
+            _save_jobs(remaining)
         logger.info("%d abgelaufene Jobs entfernt", len(expired_ids))
-    active_count = len(sched.get_jobs()) if sched.get_jobs else 0
     if not sched.running:
         sched.start()
     active_count = len(sched.get_jobs())
@@ -495,16 +535,17 @@ def start_scheduler_if_enabled() -> bool:
 
 def remove_scheduled_job(job_id_prefix: str) -> tuple[bool, str]:
     """Entfernt einen Job anhand der (Teil-)ID."""
-    jobs = _load_jobs()
-    matches = [j for j in jobs if j.get("id", "").startswith(job_id_prefix)]
-    if not matches:
-        return False, "Job nicht gefunden."
-    if len(matches) > 1:
-        return False, f"{len(matches)} Jobs gefunden – ID genauer angeben."
-    job = matches[0]
-    jid = job["id"]
-    remaining = [j for j in jobs if j["id"] != jid]
-    _save_jobs(remaining)
+    with _jobs_lock:
+        jobs = _load_jobs()
+        matches = [j for j in jobs if j.get("id", "").startswith(job_id_prefix)]
+        if not matches:
+            return False, "Job nicht gefunden."
+        if len(matches) > 1:
+            return False, f"{len(matches)} Jobs gefunden – ID genauer angeben."
+        job = matches[0]
+        jid = job["id"]
+        remaining = [j for j in jobs if j["id"] != jid]
+        _save_jobs(remaining)
     sched = get_scheduler()
     if sched:
         try:
@@ -515,7 +556,8 @@ def remove_scheduled_job(job_id_prefix: str) -> tuple[bool, str]:
 
 
 def list_scheduled_jobs() -> list[dict[str, Any]]:
-    return _load_jobs()
+    with _jobs_lock:
+        return _load_jobs()
 
 
 def update_schedule_prompt(
@@ -530,34 +572,35 @@ def update_schedule_prompt(
 ) -> tuple[bool, str]:
     """Aktualisiert Prompt, Modell, Zeitplan und/oder Ziel (Raum/Channel/Client) eines bestehenden Jobs.
     Sentinel-Default ... = Feld unverändert lassen. None = Feld löschen."""
-    jobs = _load_jobs()
-    job = next((j for j in jobs if j.get("id") == job_id), None)
-    if not job:
-        return False, f"Job {job_id[:8]} nicht gefunden"
-    if new_prompt:
-        job["prompt"] = new_prompt
-    if new_model is not None:
-        if new_model:
-            job["model"] = new_model
-        else:
-            job.pop("model", None)
-    for field, value in (("room_id", new_room_id), ("channel_id", new_channel_id), ("client", new_client)):
-        if value is ...:  # unchanged
-            continue
-        if value:
-            job[field] = value
-        else:
-            job.pop(field, None)
-    new_trigger_type: str | None = None
-    new_trigger_args: dict | None = None
-    if new_when:
-        parsed = _parse_when(new_when)
-        if not parsed:
-            return False, "Ungültiges 'when': Cron (5 Felder, z.B. '30 7 * * *') oder 'in N minutes'"
-        new_trigger_type, new_trigger_args = parsed
-        job["trigger"] = new_trigger_type
-        job["trigger_args"] = new_trigger_args
-    _save_jobs(jobs)
+    with _jobs_lock:
+        jobs = _load_jobs()
+        job = next((j for j in jobs if j.get("id") == job_id), None)
+        if not job:
+            return False, f"Job {job_id[:8]} nicht gefunden"
+        if new_prompt:
+            job["prompt"] = new_prompt
+        if new_model is not None:
+            if new_model:
+                job["model"] = new_model
+            else:
+                job.pop("model", None)
+        for field, value in (("room_id", new_room_id), ("channel_id", new_channel_id), ("client", new_client)):
+            if value is ...:  # unchanged
+                continue
+            if value:
+                job[field] = value
+            else:
+                job.pop(field, None)
+        new_trigger_type: str | None = None
+        new_trigger_args: dict | None = None
+        if new_when:
+            parsed = _parse_when(new_when)
+            if not parsed:
+                return False, "Ungültiges 'when': Cron (5 Felder, z.B. '30 7 * * *') oder 'in N minutes'"
+            new_trigger_type, new_trigger_args = parsed
+            job["trigger"] = new_trigger_type
+            job["trigger_args"] = new_trigger_args
+        _save_jobs(jobs)
     # APScheduler-Job-Args aktualisieren damit der nächste Run den neuen Prompt hat
     sched = get_scheduler()
     if sched:
@@ -584,7 +627,7 @@ def update_schedule_prompt(
                             hour=new_trigger_args.get("hour", "*"),
                             day=new_trigger_args.get("day", "*"),
                             month=new_trigger_args.get("month", "*"),
-                            day_of_week=new_trigger_args.get("day_of_week", "*"),
+                            day_of_week=_cron_dow_to_aps(new_trigger_args.get("day_of_week", "*")),
                         ))
         except Exception as e:
             logger.warning("APScheduler job update failed: %s", e)

@@ -88,21 +88,6 @@ def cli_is_available() -> bool:
     return cli_find_binary() is not None
 
 
-def cli_get_version() -> str | None:
-    """Gibt die Claude Code Version zurück oder None."""
-    exe = cli_find_binary()
-    if not exe:
-        return None
-    try:
-        r = subprocess.run(
-            [exe, "--version"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return r.stdout.strip() if r.returncode == 0 else None
-    except Exception:
-        return None
-
-
 def cli_chat(
     message: str,
     *,
@@ -629,7 +614,6 @@ def _parse_api_response(resp: dict[str, Any]) -> dict[str, Any]:
 # Legacy aliases (für bestehenden Code)
 is_available = cli_is_available
 chat = cli_chat
-ask_cli = lambda msg, **kw: (cli_chat(msg, **kw).get("message") or {}).get("content", "").strip()
 
 
 def cli_list_models() -> list[str]:

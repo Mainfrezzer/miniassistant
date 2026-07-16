@@ -25,18 +25,20 @@ def _encoded_variants(s: str) -> list[str]:
     """Gängige Shell-Transformationen eines Secrets, damit `exec("… | base64")`-Exfiltration
     nicht durchrutscht. Deckt NICHT alles ab (rot13, reverse, gzip, awk-spacing …) — der echte
     Schutz ist, das Modell nicht an die Secrets zu lassen. Dies hebt nur die Latte gegen den
-    häufigsten Fall (base64/hex)."""
-    raw = s.encode("utf-8", "replace")
+    häufigsten Fall (base64/hex). Bekannte Lücke: base64 mit Zeilenumbrüchen (Default-Wrap
+    bei >76 Zeichen Input) wird nicht erkannt."""
     variants: list[str] = []
-    b64 = _b64.b64encode(raw).decode("ascii")
-    variants.append(b64)                 # mit Padding
-    variants.append(b64.rstrip("="))     # ohne Padding
-    variants.append(_b64.b16encode(raw).decode("ascii"))         # HEX upper (xxd -p uppercase)
-    variants.append(_b64.b16encode(raw).decode("ascii").lower()) # hex lower
-    try:
-        variants.append(_b64.urlsafe_b64encode(raw).decode("ascii").rstrip("="))
-    except Exception:
-        pass
+    # `echo $TOKEN | base64` encodiert "TOKEN\n" → beide Varianten abdecken
+    for raw in (s.encode("utf-8", "replace"), (s + "\n").encode("utf-8", "replace")):
+        b64 = _b64.b64encode(raw).decode("ascii")
+        variants.append(b64)                 # mit Padding
+        variants.append(b64.rstrip("="))     # ohne Padding
+        variants.append(_b64.b16encode(raw).decode("ascii"))         # HEX upper (xxd -p uppercase)
+        variants.append(_b64.b16encode(raw).decode("ascii").lower()) # hex lower
+        try:
+            variants.append(_b64.urlsafe_b64encode(raw).decode("ascii").rstrip("="))
+        except Exception:
+            pass
     return [v for v in variants if len(v) >= _MIN_SECRET_LEN]
 
 
@@ -173,3 +175,11 @@ def mask_stream_events(events: Iterator[dict[str, Any]], config: dict[str, Any])
             yield new_ev
             continue
         yield ev
+    # Stream ended without done event (error path): flush buffered tail so no text is lost.
+    # After a regular done the buffers are already empty → no-op.
+    tail_c = cmask.flush()
+    tail_t = tmask.flush()
+    if tail_c:
+        yield {"type": "content", "delta": tail_c}
+    if tail_t:
+        yield {"type": "thinking", "delta": tail_t}

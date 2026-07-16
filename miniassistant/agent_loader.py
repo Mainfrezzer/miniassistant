@@ -1580,6 +1580,15 @@ def build_system_prompt(
     if config.get("_scheduled_task_prompt") is not None and config.get("schedule_slim_prompt", True):
         return _build_schedule_system_prompt(config, files, current_model, is_root)
 
+    # Agent-Kontext in Bot-Räumen (Matrix/Discord/Telegram DM oder Raum auf context:agent):
+    # Raum-Sprache anwenden; 'auto' = Sprache des Inputs (wie das WebUI-Label verspricht).
+    # Web/CLI bleiben beim IDENTITY-Default (kein Bot-Raum).
+    _bot_room_force_lang = chat_ctx.get("language_override") or None
+    _bot_room_input_lang = (
+        not _bot_room_force_lang
+        and str(chat_ctx.get("platform") or "").strip().lower() in ("matrix", "discord", "telegram")
+    )
+
     parts = [
         "# Role and context",
         "You are the assistant of **MiniAssistant**. The user may be chatting via the Web-UI or any configured chat client (Matrix, Discord, Telegram, ...).",
@@ -1595,7 +1604,7 @@ def build_system_prompt(
         + "\n\nDo not mention being an AI, the user knows. Be focused and factual.",
         "",
         "## IDENTITY (your identity)",
-        (_strip_language_from_identity(files.get("IDENTITY.md", "")) if config.get("respond_in_input_language") else files.get("IDENTITY.md", "")),
+        (_strip_language_from_identity(files.get("IDENTITY.md", "")) if (config.get("respond_in_input_language") or _bot_room_force_lang or _bot_room_input_lang) else files.get("IDENTITY.md", "")),
         "",
         "## Environment",
         _tools_umgebung_section(files.get("TOOLS.md", ""), config),
@@ -1607,7 +1616,7 @@ def build_system_prompt(
         _room_last_fire_section(config),
         _memory_section(project_dir, config),
         _prefs_section(config),
-        _language_section(config, files.get("IDENTITY.md") or ""),
+        _language_section(config, files.get("IDENTITY.md") or "", force_lang=_bot_room_force_lang, input_language=_bot_room_input_lang),
         _knowledge_verification_section(has_search=bool(config.get("search_engines")), slim=False),
         _units_section_from_prefs(config),
         _quantities_section(),

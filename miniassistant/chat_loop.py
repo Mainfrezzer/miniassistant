@@ -510,13 +510,6 @@ def _strip_dead_links(text: str, max_links: int = 10, timeout: float = 12.0) -> 
 
 
 # ── Research-Gate ────────────────────────────────────────────────────────
-# Tools die als "Daten beschafft" zählen → Gate feuert NICHT. exec deckt curl/API-Calls
-# (z.B. GitHub-Download-Zahlen), invoke_model deckt Subagenten-Recherche. Sonst feuert das
-# Gate fälschlich wenn das Modell Fakten via exec/curl statt web_search holt.
-_RESEARCH_SATISFYING_TOOLS = frozenset({
-    "exec", "web_search", "web_search_multi", "read_url", "check_url",
-    "read_email", "invoke_model", "download_file", "search_memory", "search_docs",
-})
 # Output-based research-gate detector (language-agnostic). Instead of guessing from the
 # QUESTION (keyword list, German-only), check the ANSWER: does it assert a hard fact
 # (price / version) that is NOT in this round's tool output? Prices/versions are
@@ -623,12 +616,15 @@ def _is_image_caption_only(text: str) -> bool:
 # CORE = täglicher Agent-Loop, immer da. Opt-in via config lazy_tools (default aus,
 # reliability-first: ein nicht-geladenes Tool kann das Modell diese Runde nicht rufen).
 _LAZY_CORE_TOOLS = {
-    "exec", "web_search", "web_search_multi", "read_url", "check_url",
+    "exec", "web_search", "read_url", "check_url",
     "invoke_model", "send_image", "download_file", "status_update", "wait",
     # search_memory/search_docs: always visible — the model can't decide to recall
     # what it can't see, and keyword-gating recall questions proved too brittle
     # ("erinnern" missed the "erinnerst du" trigger → model concluded memory was empty).
     "search_memory", "search_docs",
+    # device_action: schema-side gated (only registered when the request carries a
+    # device_id), so no keyword gate needed — any device request may need it.
+    "device_action",
 }
 _LAZY_TOOL_GROUPS: dict[str, tuple[set[str], tuple[str, ...]]] = {
     "email":    ({"send_email", "read_email"},
@@ -817,9 +813,22 @@ def _is_planning_only(text: str, threshold: float = 0.7) -> bool:
 
 _SUBAGENT_FAILURE_MARKERS = (
     "[api error:", "[openai api error:", "[timeout",
+    "[tool-timeout",  # synthetic batch-timeout result ("[Tool-Timeout nach …s …]", both paths)
     "timed out", "all retries failed",
     "[subagent returned planning text",
     "(keine antwort)", "nicht erreichbar",
+)
+
+# Announce-without-doing detection (shared by chat_round + chat_round_stream):
+# thinking announced a tool call but none was emitted → nudge once.
+_TOOL_ANNOUNCE_KEYS = ("invoke_model", "web_search", "read_url", "check_url", "exec", "send_email", "schedule", "debate")
+_ANNOUNCE_PHRASES = (
+    "i will ", "i'll ", "let me ", "let's ", "i need to ", "i'm going to ", "going to call",
+    "ich werde ", "ich rufe ", "lass mich ", "lasst mich ", "ich muss ", "jetzt rufe ",
+)
+_ANNOUNCE_NUDGE_MSG = (
+    "STOP. You announced that you would call tools but did NOT emit any tool call. "
+    "Call your tools RIGHT NOW — do not describe, just emit the tool call immediately."
 )
 
 _RESEARCH_TOOLS = frozenset({"web_search", "read_url", "check_url", "exec"})
@@ -2282,6 +2291,15 @@ _EXTERNAL_CONTENT_TOOLS = frozenset({"exec", "web_search", "read_url", "check_ur
 
 _IMG_DELIVER_LOCK = threading.Lock()
 
+# Per-tool-call state for invoke_model. Parallel tool calls run in separate executor
+# threads — per-call image params must NOT travel via the shared config dict (calls
+# would stomp each other's params). Set before dispatch, cleared in finally.
+_TOOL_CALL_TLS = threading.local()
+
+
+def _tls_img_gen_params() -> dict[str, Any]:
+    return getattr(_TOOL_CALL_TLS, "img_gen_params", None) or {}
+
 
 # Multi-Bild-Absicht: nur explizite Formulierungen heben das 1-Bild-Default an.
 _MULTI_NUM_WORDS = {
@@ -2341,9 +2359,12 @@ def _image_turn_cap(config: dict[str, Any]) -> int:
     Sicherheits-Ceiling) erlaubt.
     Counter resettet pro Nachricht (matrix_bot/discord_bot shallow-copyen config je Turn)."""
     try:
-        ceiling = max(1, int(config.get("images_max_per_turn") or 4))
+        _v = config.get("images_max_per_turn")
+        ceiling = int(_v) if _v is not None else 4
     except (TypeError, ValueError):
         ceiling = 4
+    if ceiling <= 0:
+        return 0  # explicit 0 = no images this turn
     text = _current_user_message(config.get("_user_request_text") or "")
     # Zahl vor Bild-Nomen ODER Mengen-Imperativ ("mach noch 4", "gib mir 2") → explizite Anzahl.
     m = _MULTI_IMAGE_NUM_RE.search(text) or _MULTI_QUANTITY_RE.search(text)
@@ -3347,6 +3368,25 @@ def _run_tool(
             return "\n".join(parts) if parts else f"Bild gespeichert: {image_path} (kein Chat-Client im Kontext)"
         except Exception as e:
             return f"send_image failed: {e}"
+    if name == "device_action":
+        action = (arguments.get("action") or "").strip().lower()
+        arg = (arguments.get("arg") or "").strip()
+        chat_ctx = config.get("_chat_context") or {}
+        device_id = chat_ctx.get("device_id")
+        if not device_id:
+            return "device_action: kein Ger\u00e4t im Kontext dieser Anfrage"
+        valid = {"open_app", "media", "volume", "play_url", "stop_playback"}
+        if action not in valid:
+            return f"device_action: unbekannte Aktion '{action}'. Erlaubt: {', '.join(sorted(valid))}"
+        if action == "media" and arg not in {"play", "pause", "playpause", "next", "prev", "stop"}:
+            return "device_action media: arg muss play|pause|playpause|next|prev|stop sein"
+        if action == "open_app" and not arg:
+            return "device_action open_app: arg (Paketname oder App-Name) fehlt"
+        if action == "play_url" and not (arg.startswith("http://") or arg.startswith("https://")):
+            return "device_action play_url: arg muss eine http(s)-Stream-URL sein"
+        config.setdefault("_pending_device_actions", []).append({"action": action, "arg": arg})
+        return f"Aktion '{action}' wird auf Ger\u00e4t '{device_id}' ausgef\u00fchrt, sobald deine Antwort zugestellt ist"
+
     if name == "send_audio":
         text = arguments.get("text", "").strip()
         if not text:
@@ -3959,11 +3999,10 @@ def _run_tool(
                           _invoke_attempt + 1, _max_invoke_attempts, resolved, _last_invoke_err)
                 time.sleep(5)
                 _t0_sub = time.monotonic()
-            # Set params atomically before each attempt, clean up in finally
-            if _img_gen_params_snapshot:
-                config["_img_gen_params"] = dict(_img_gen_params_snapshot)
-            else:
-                config.pop("_img_gen_params", None)
+            # Per-call image params in thread-local (parallel-safe), cleared in finally
+            _TOOL_CALL_TLS.img_gen_params = (
+                dict(_img_gen_params_snapshot) if _img_gen_params_snapshot else None
+            )
             try:
                 if provider_type == "claude-code":
                     _sub_result = _run_subagent_claude_code(
@@ -4035,7 +4074,7 @@ def _run_tool(
                 _aal.log_subagent_result(config, resolved, err, "")
                 return err
             finally:
-                config.pop("_img_gen_params", None)
+                _TOOL_CALL_TLS.img_gen_params = None
     return f"Unknown tool: {name}"
 
 
@@ -4625,7 +4664,7 @@ def _run_subagent_google(
     is_img_gen = _google_img_gen(api_model)
     sub_tools = get_subagent_tools_schema(config) if not is_img_gen else []
     # Image Editing: Quellbild als inline image in der Message mitschicken
-    _explicit_g = config.get("_img_gen_params") or {}
+    _explicit_g = _tls_img_gen_params()
     _edit_src_g = _explicit_g.get("image_path", "").strip()
     _user_msg_dict: dict[str, Any] = {"role": "user", "content": user_msg}
     if is_img_gen and _edit_src_g:
@@ -4864,7 +4903,23 @@ def _run_subagent_openai(
         # (→ neuer Dedup-Key → Prompt-Dedup verfehlt) und re-generieren dasselbe Motiv → kam 2-4×
         # im Raum an. Greift VOR der teuren Generierung (qwen-image-edit ~5min/Call). Counter
         # resettet pro Nachricht; Limit via images_max_per_turn (default 1).
-        if int(config.get("_send_image_count_this_turn") or 0) >= _image_turn_cap(config):
+        # Atomic check-and-reserve: parallel gens must not both pass the cap check.
+        # Cap counts delivered + in-flight; reservation released in finally below.
+        with _IMG_DELIVER_LOCK:
+            _img_cap = _image_turn_cap(config)
+            _img_delivered = int(config.get("_send_image_count_this_turn") or 0)
+            _img_inflight = int(config.get("_img_gen_inflight") or 0)
+            _img_blocked = (_img_delivered + _img_inflight) >= _img_cap
+            if not _img_blocked:
+                config["_img_gen_inflight"] = _img_inflight + 1
+        if _img_cap <= 0:
+            _done = (
+                "Bildgenerierung ist deaktiviert (images_max_per_turn=0). Es wurde KEIN Bild "
+                "erzeugt. Informiere den User kurz, dass Bildgenerierung aktuell abgeschaltet ist."
+            )
+            _aal.log_subagent_result(config, resolved_name, _done, "")
+            return _done
+        if _img_blocked:
             _done = (
                 "STOP: In diesem Turn wurde bereits ein Bild generiert und direkt in den Raum "
                 "gesendet (Limit erreicht). Es wurde KEIN weiteres Bild erzeugt. Die Aufgabe ist "
@@ -4881,7 +4936,7 @@ def _run_subagent_openai(
             import time as _time
             import re as _img_re
             # Parameter: explizite Tool-Parameter haben Vorrang, Regex-Fallback aus Prompt
-            _explicit = config.get("_img_gen_params") or {}
+            _explicit = _tls_img_gen_params()
             _img_kwargs: dict[str, Any] = {}
             if _explicit.get("size"):
                 _img_kwargs["size"] = _explicit["size"]
@@ -5085,7 +5140,8 @@ def _run_subagent_openai(
                 else:
                     # Web/API: Bild wird inline injiziert (gilt als geliefert) → mitzählen,
                     # damit der prompt-unabhängige Loop-Guard auch hier greift.
-                    config["_send_image_count_this_turn"] = int(config.get("_send_image_count_this_turn") or 0) + 1
+                    with _IMG_DELIVER_LOCK:
+                        config["_send_image_count_this_turn"] = int(config.get("_send_image_count_this_turn") or 0) + 1
                     result = f"Bild {_op_de} und gespeichert: `{_display_fpath}` (wird dem User inline angezeigt)"
                 if r.get("revised_prompt"):
                     result += f"\n\nRevisierter Prompt: {r['revised_prompt']}"
@@ -5098,6 +5154,10 @@ def _run_subagent_openai(
             err = f"{_op_name} Fehler: {e}"
             _aal.log_subagent_result(config, resolved_name, err, "")
             return err
+        finally:
+            # Release the in-flight reservation from the pre-gen check
+            with _IMG_DELIVER_LOCK:
+                config["_img_gen_inflight"] = max(0, int(config.get("_img_gen_inflight") or 1) - 1)
 
     sub_tools = get_subagent_tools_schema(config)
     _sub_num_ctx = get_num_ctx_for_model(config, resolved_name)
@@ -5105,7 +5165,7 @@ def _run_subagent_openai(
     msgs: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
     # Vision via invoke_model(model=VL, image_path=...): wenn nicht img-gen aber image_path gesetzt,
     # Datei einlesen und als images-Attachment dem User-Message hinzufügen.
-    _vl_params = config.get("_img_gen_params") or {}
+    _vl_params = _tls_img_gen_params()
     _vl_img_path = (_vl_params.get("image_path") or "").strip()
     if _vl_img_path and not _is_img_gen:
         try:
@@ -6044,6 +6104,20 @@ def chat_round(
     # dem 1. Bild >= cap → jeder weitere invoke_model-Image-Call STOPpt sofort (0.0s).
     config["_send_image_count_this_turn"] = 0
     config["_send_image_missing_paths"] = {}
+    config["_img_gen_inflight"] = 0
+    # Defensive per-turn clears: these keys live in the session-persistent config —
+    # an early return in a previous turn must not leak state into this one.
+    config.pop("_pending_images", None)
+    config.pop("_pending_audio", None)
+    config.pop("_auto_sent_image_paths", None)
+    config.pop("_response_handled_via_side_effect", None)
+    # Clear stale cancel flags: an /abort typed while nothing was running must not
+    # instantly kill this run.
+    try:
+        from miniassistant.cancellation import clear_cancel_for_chat as _clear_stale_cancel
+        _clear_stale_cancel(config.get("_chat_context") or None)
+    except Exception:
+        pass
     # Slot-Cache: Restore versuchen wenn conv_id im Context gesetzt
     _ctx = config.get("_chat_context") or {}
     _conv_id = _ctx.get("conv_id")
@@ -6065,8 +6139,7 @@ def chat_round(
     _research_gate_max = int(config.get("research_gate_max") or 1)
     _research_gate_attempts = 0
     _web_search_count = 0
-    _read_url_count = 0
-    _data_tool_count = 0          # alle daten-beschaffenden Tools (exec/curl, invoke_model, ...) — Research-Gate
+    _announce_nudge_fired = False  # rate-limit announce-without-doing nudge to 1x per request
     _has_search = bool(config.get("search_engines"))
     # Tool-Call-Dedup (Parität mit chat_round_stream): identische research-Calls 2× → block statt erneut ausführen.
     # Verhindert Cross-Round-Loops (z. B. gleicher web_search 50× hintereinander) im Matrix/Discord/Scheduler-Pfad.
@@ -6128,11 +6201,6 @@ def chat_round(
         user_content = _fit_docs(user_content, _avail_tok * 3)
 
     for try_model in models_to_try:
-        # Provider-Präfix auflösen: base_url + clean model name + api_key für API
-        base_url = get_base_url_for_model(config, try_model)
-        model_api_key = get_api_key_for_model(config, try_model)
-        _, api_model = get_provider_config(config, try_model)
-        api_model = api_model or try_model
         msgs = list(compacted_messages)
         user_msg: dict[str, Any] = {"role": "user", "content": user_content}
         if images:
@@ -6330,6 +6398,22 @@ def chat_round(
                         })
                         rounds += 1
                         continue
+                    # Announce-without-doing nudge (parity with stream): thinking announced
+                    # a tool call but none was emitted — post-hoc check, response is complete
+                    # here. Discard the round output, nudge once, retry.
+                    _rt_lower_cr = (msg.get("thinking") or "").lower()
+                    _stripped_dc = _display_content.strip()
+                    if (not _sent_image
+                            and not _announce_nudge_fired
+                            and any(k in _rt_lower_cr for k in _TOOL_ANNOUNCE_KEYS)
+                            and any(p in _rt_lower_cr for p in _ANNOUNCE_PHRASES)
+                            and len(_stripped_dc) < 200
+                            and rounds < max_tool_rounds - 1):
+                        _log.info("Announce-without-doing nudge (chat_round, rounds=%d): thinking announced tool call but none emitted", rounds)
+                        _announce_nudge_fired = True
+                        msgs.append({"role": "user", "content": _ANNOUNCE_NUDGE_MSG})
+                        rounds += 1
+                        continue
                     total_content += _display_content  # Nur finale Runde akkumulieren
                     msgs.append({"role": "assistant", "content": _msg_content or "", "thinking": msg.get("thinking") or ""})
                     _aal.log_thinking(config, msg.get("thinking") or "")
@@ -6446,10 +6530,6 @@ def chat_round(
                     msgs.append({"role": "tool", "tool_name": name, "content": result})
                     if name in ("web_search", "web_search_multi"):
                         _web_search_count += 1
-                    if name in ("read_url", "check_url"):
-                        _read_url_count += 1
-                    if name in _RESEARCH_SATISFYING_TOOLS:
-                        _data_tool_count += 1
                     if _url_guard_enabled:
                         _seen_urls |= _harvest_urls(result if isinstance(result, str) else str(result))
                         if name in ("read_url", "check_url") and isinstance(args, dict) and args.get("url"):
@@ -6798,6 +6878,20 @@ def chat_round_stream(
     # Per-Turn Image-State resetten (siehe chat_round) — config überlebt Turns via session.
     config["_send_image_count_this_turn"] = 0
     config["_send_image_missing_paths"] = {}
+    config["_img_gen_inflight"] = 0
+    # Defensive per-turn clears (parity with chat_round): early returns in a previous
+    # turn must not leak pending media or the side-effect flag into this one.
+    config.pop("_pending_images", None)
+    config.pop("_pending_audio", None)
+    config.pop("_auto_sent_image_paths", None)
+    config.pop("_response_handled_via_side_effect", None)
+    # Clear stale cancel flags: an /abort typed while nothing was running must not
+    # instantly kill this run.
+    try:
+        from miniassistant.cancellation import clear_cancel_for_chat as _clear_stale_cancel_s
+        _clear_stale_cancel_s(config.get("_chat_context") or None)
+    except Exception:
+        pass
     # Slot-Cache: Restore versuchen wenn conv_id im Context gesetzt
     _ctx_s = config.get("_chat_context") or {}
     _conv_id_s = _ctx_s.get("conv_id")
@@ -6911,9 +7005,8 @@ def chat_round_stream(
     _research_gate_max = int(config.get("research_gate_max") or 1)
     _research_gate_attempts = 0
     _web_search_count = 0          # web_search-Aufrufe in dieser Runde (für Research-Gate)
-    _read_url_count = 0            # read_url/check_url-Aufrufe (zählt auch als Recherche)
-    _data_tool_count = 0          # alle daten-beschaffenden Tools (exec/curl, invoke_model, ...) — Research-Gate
     _has_search = bool(config.get("search_engines"))
+    _model_idx = 0                 # index into models_to_try; advances on persistent API failure
 
     while rounds < max_tool_rounds:
         # Per-round smart compaction: after round 0, check if tool results grew context past budget.
@@ -6934,7 +7027,7 @@ def chat_round_stream(
                 yield {"type": "status", "message": "Chat-Verlauf wird komprimiert…"}
                 _notify_chat_compaction_start(config)
                 msgs, _new_sum = _compact_history(
-                    config, msgs, models_to_try[0] if rounds == 0 else effective_model,
+                    config, msgs, models_to_try[_model_idx],
                     system_prompt, tools_schema, _compact_num_ctx,
                     prior_summary=_chat_summary,
                 )
@@ -6944,13 +7037,8 @@ def chat_round_stream(
                 _last_real_ctx = None
                 _msgs_len_at_call = len(msgs)
                 yield {"type": "status", "message": "Verlauf komprimiert."}
-        try_model = models_to_try[0] if rounds == 0 else effective_model
+        try_model = models_to_try[_model_idx]
         effective_model = try_model
-        # Provider-Präfix auflösen: base_url + clean model name + api_key für API
-        base_url = get_base_url_for_model(config, try_model)
-        stream_api_key = get_api_key_for_model(config, try_model)
-        _, api_model = get_provider_config(config, try_model)
-        api_model = api_model or try_model
         think = get_think_for_model(config, try_model)
         options = get_options_for_model(config, try_model)
         tools = tools_schema if _provider_supports_tools(config, try_model) else []
@@ -7169,11 +7257,29 @@ def chat_round_stream(
             except Exception:
                 pass
             _log.error("Stream-Runde %d gescheitert: %s", rounds, e)
+            _stream_log.finish()
+            # Model fallback (parity with chat_round): on persistent API failure advance
+            # to the next model in models_to_try; only give up when all are exhausted.
+            if _model_idx + 1 < len(models_to_try):
+                _model_idx += 1
+                _next_model = models_to_try[_model_idx]
+                _reason = str(e)
+                try:
+                    _resp = getattr(e, "response", None)
+                    if _resp is not None:
+                        _reason = f"HTTP {_resp.status_code} – {_reason}"
+                except Exception:
+                    pass
+                switch_info = {"model": _next_model, "reason": _reason}
+                _log.warning("Stream: Wechsel auf Fallback-Modell %s (Grund: %s)", _next_model, _reason)
+                yield {"type": "status", "message": f"⚠️ Modell {try_model} fehlgeschlagen — wechsle zu {_next_model}"}
+                continue
             if not total_content:
                 _err_delta = f"⚠️ Verbindungsfehler (Runde {rounds + 1}): {str(e)[:120]}"
                 yield {"type": "content", "delta": _err_delta}
                 total_content = _err_delta
-            _stream_log.finish()
+            config.pop("_pending_images", None)
+            config.pop("_pending_audio", None)
             yield {"type": "done", "error": str(e), "thinking": total_thinking, "content": total_content, "new_messages": msgs, "debug_info": None, "switch_info": switch_info, "ctx": [_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs), _ctx_max]}
             return
 
@@ -7197,6 +7303,8 @@ def chat_round_stream(
                     yield {"type": "content", "delta": _abort_msg}
                 msgs.append({"role": "assistant", "content": total_content.strip()})
                 _stream_log.finish()
+                config.pop("_pending_images", None)
+                config.pop("_pending_audio", None)
                 _ctx_used = _last_real_ctx or (_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs))
                 yield {"type": "done", "thinking": total_thinking.strip(), "content": total_content.strip(),
                        "new_messages": msgs, "debug_info": None, "switch_info": switch_info,
@@ -7240,12 +7348,7 @@ def chat_round_stream(
 
         # Announce-without-doing nudge: model announced tool usage in thinking but emitted no tool call.
         # Strict trigger to avoid false-positives on legit short answers, mid-stream cuts,
-        # or thinking that merely *references* past tool results.
-        _TOOL_ANNOUNCE_KEYS = ("invoke_model", "web_search", "read_url", "check_url", "exec", "send_email", "schedule", "debate")
-        _ANNOUNCE_PHRASES = (
-            "i will ", "i'll ", "let me ", "let's ", "i need to ", "i'm going to ", "going to call",
-            "ich werde ", "ich rufe ", "lass mich ", "lasst mich ", "ich muss ", "jetzt rufe ",
-        )
+        # or thinking that merely *references* past tool results. Shared constants (module level).
         _rt_lower = (round_thinking or "").lower()
         _thinking_announces_tool = (
             any(k in _rt_lower for k in _TOOL_ANNOUNCE_KEYS)
@@ -7266,7 +7369,7 @@ def chat_round_stream(
             _announce_nudge_fired = True
             if round_content:
                 total_content = total_content[:-len(round_content)]  # revert premature accumulation
-            msgs.append({"role": "user", "content": "STOP. You announced that you would call tools but did NOT emit any tool call. Call your tools RIGHT NOW — do not describe, just emit the tool call immediately."})
+            msgs.append({"role": "user", "content": _ANNOUNCE_NUDGE_MSG})
             rounds += 1
             continue
 
@@ -7479,11 +7582,21 @@ def chat_round_stream(
             if _cancel_level:
                 clear_cancel_for_chat(_chat_ctx_sc)
                 _log.info("Stream cancellation (%s) — breche nach Runde %d ab (ctx=%s)", _cancel_level, rounds, {k:_chat_ctx_sc.get(k) for k in ("user_id","room_id","channel_id")})
-                total_content += "\n\n*(Verarbeitung abgebrochen)*"
-                msgs.append({"role": "assistant", "content": total_content.strip()})
-                _final_content, _final_thinking = _clean_response(
-                    "" if _sent_image else total_content.strip(), total_thinking.strip())
-                yield {"type": "content", "delta": "\n\n*(Verarbeitung abgebrochen)*"}
+                config.pop("_pending_images", None)
+                config.pop("_pending_audio", None)
+                if _cancel_level == "abort":
+                    # Hard abort (parity with chat_round): suppress output entirely —
+                    # the user already got the /abort confirmation.
+                    total_content = "[NO_MESSAGE]"
+                    _final_content, _final_thinking = total_content, ""
+                    msgs.append({"role": "assistant", "content": total_content})
+                else:
+                    # Graceful stop: keep partial output + note.
+                    total_content += "\n\n*(Verarbeitung abgebrochen)*"
+                    msgs.append({"role": "assistant", "content": total_content.strip()})
+                    _final_content, _final_thinking = _clean_response(
+                        "" if _sent_image else total_content.strip(), total_thinking.strip())
+                    yield {"type": "content", "delta": "\n\n*(Verarbeitung abgebrochen)*"}
                 _cancel_tps = _aal.extract_tps(last_response, time.monotonic() - _t0_stream, _final_content, _final_thinking)
                 _stream_log.finish(_cancel_tps)
                 yield {"type": "done", "thinking": _final_thinking, "content": _final_content, "new_messages": msgs, "debug_info": debug_info, "switch_info": switch_info, "tps": _cancel_tps, "ctx": [_estimate_tokens(system_effective or "") + _messages_token_estimate(msgs), _ctx_max]}
@@ -7621,8 +7734,6 @@ def chat_round_stream(
                 msgs.append({"role": "tool", "tool_name": name, "content": result})
                 if name in ("web_search", "web_search_multi"):
                     _web_search_count += 1
-                if name in ("read_url", "check_url"):
-                    _read_url_count += 1
                 if _url_guard_enabled:
                     # URLs aus Tool-Ergebnis ernten + die explizit gelesene/geprüfte URL
                     _seen_urls |= _harvest_urls(result if isinstance(result, str) else str(result))
@@ -7640,6 +7751,11 @@ def chat_round_stream(
                         except Exception:
                             pass
                 if name in ("send_image", "send_audio"):
+                    _img_platform = (config.get("_chat_context") or {}).get("platform")
+                    if _img_platform not in ("web", "api"):
+                        _sent_image = True
+                # Auto-geliefertes Bild = die Antwort, wie send_image behandeln (siehe chat_round).
+                if name == "invoke_model" and (config.get("_auto_sent_image_paths") or None):
                     _img_platform = (config.get("_chat_context") or {}).get("platform")
                     if _img_platform not in ("web", "api"):
                         _sent_image = True
@@ -7897,6 +8013,12 @@ def create_session(config: dict[str, Any] | None = None, project_dir: str | None
         _gm = chat_ctx["group_model"]
         if _group_model_allowed(config, chat_ctx.get("group_models_allow") or [], _gm):
             model = resolve_model(config, _gm) or _gm
+    elif not chat_ctx.get("group_mode") and chat_ctx.get("room_model"):
+        # Agent-Kontext-Raum mit persistiertem Raum-Modell: überschreibt das Default-Modell.
+        # Owner-Kontext → keine Allowlist nötig; /model in der Session kann weiter wechseln.
+        _rm = resolve_model(config, chat_ctx["room_model"])
+        if _rm:
+            model = _rm
     system_prompt = build_system_prompt(config, project_dir, current_model=model)
     return {
         "config": config,

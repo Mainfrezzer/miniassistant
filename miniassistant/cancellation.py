@@ -32,22 +32,21 @@ def clear_cancel(user_id: str) -> None:
 
 
 def cancel_keys_for_ctx(chat_ctx: dict | None) -> list[str]:
-    """Liste der Cancel-Schlüssel für einen Chat-Kontext.
-    Owner-Mode: nur user_id (sender). Group-Mode: user_id + room:<id> / chan:<id>
-    → jeder Teilnehmer kann den laufenden Task per /abort abbrechen."""
+    """All cancel keys for a chat context: user_id (sender) plus room:<id> / chan:<id>.
+    Room/channel keys are always included — the bots set them in agent-mode rooms too,
+    not only in group mode."""
     if not chat_ctx:
         return []
     keys: list[str] = []
     uid = chat_ctx.get("user_id")
     if uid:
         keys.append(str(uid))
-    if chat_ctx.get("group_mode"):
-        rid = chat_ctx.get("room_id")
-        cid = chat_ctx.get("channel_id")
-        if rid:
-            keys.append(f"room:{rid}")
-        if cid:
-            keys.append(f"chan:{cid}")
+    rid = chat_ctx.get("room_id")
+    cid = chat_ctx.get("channel_id")
+    if rid:
+        keys.append(f"room:{rid}")
+    if cid:
+        keys.append(f"chan:{cid}")
     return keys
 
 

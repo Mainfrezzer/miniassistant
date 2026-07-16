@@ -159,10 +159,6 @@ def _set_inviter(chat_id: str, inviter_id: str | None) -> None:
     _save_json_file("telegram_inviters.json", snapshot)
 
 
-def get_chat_inviter(chat_id: str) -> str | None:
-    return _inviter_cache.get(str(chat_id))
-
-
 # ---------------------------------------------------------------------------
 # Sync-API (thread-safe — Bot API ist plain HTTPS, kein laufender Client nötig)
 # ---------------------------------------------------------------------------
@@ -435,8 +431,15 @@ def _get_chat_response(
         if ac_count > 0:
             try:
                 prev = fetch_recent_messages(chat_id, limit=ac_count + 1)
-                if prev and (prev[-1].get("body") or "").strip() == user_message.strip():
-                    prev = prev[:-1]
+                # Trigger-Nachricht entfernen: sender+body-Match in den letzten 5 Einträgen
+                # (nicht nur dem letzten — dazwischen kann schon Neues eingetroffen sein).
+                _um = user_message.strip()
+                for _i in range(len(prev) - 1, max(0, len(prev) - 5) - 1, -1):
+                    _pm = prev[_i]
+                    _psender = str(_pm.get("sender") or "")
+                    if (_pm.get("body") or "").strip() == _um and (not _psender or _psender == str(tg_user_id)):
+                        prev.pop(_i)
+                        break
                 prev = prev[-ac_count:] if len(prev) > ac_count else prev
                 blk = format_auto_context(prev, max_chars=ac_max, bot_sender=_bot_sender_name(), max_age_min=ac_age)
                 from miniassistant.room_images import format_block as _ri_block
@@ -450,8 +453,11 @@ def _get_chat_response(
     if chat_id:
         config["_chat_context"] = ctx
     # Group-Mode: stateless — jeder Turn frische Session.
-    if ctx.get("group_mode") or session_key not in sessions:
+    # Agent-Räume: Session neu bauen wenn Raum-Settings (Kontext/Sprache/Modell) sich geändert haben.
+    _room_sig = f"{rs.get('context')}|{rs.get('language')}|{rs.get('model')}"
+    if ctx.get("group_mode") or session_key not in sessions or sessions[session_key].get("_room_sig") != _room_sig:
         session = create_session(config, None)
+        session["_room_sig"] = _room_sig
         session["system_prompt"] = (
             session.get("system_prompt", "") +
             "\n\nTelegram: Max 4096 Zeichen/Nachricht. Laengere Antworten mit `---` trennen, werden automatisch aufgeteilt."
@@ -509,7 +515,20 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
         return False, None
 
     tg_sessions: Any = SessionLRU(max_size=200)
+    # Key = "sender|chat" (kein Cross-Chat-Leak), TTL-Prune gegen unbegrenztes Wachstum.
     _pending_images: dict[str, list[dict[str, Any]]] = {}
+    _pending_images_ts: dict[str, float] = {}
+    _PENDING_TTL_S = 6 * 3600
+
+    def _prune_pending() -> None:
+        _now = time.time()
+        for _k in [k for k, t in _pending_images_ts.items() if _now - t > _PENDING_TTL_S]:
+            _pending_images_ts.pop(_k, None)
+            _pending_images.pop(_k, None)
+
+    # Per-Sender Busy-Guard: Updates laufen als parallele Tasks — zwei gleichzeitige
+    # Runs auf derselben Session korrumpieren die History.
+    _busy_users: set[str] = set()
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(65, connect=15)) as client:
 
@@ -633,6 +652,25 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
                 logger.info("Telegram: Chat %s mode=always — Reply an anderen User, ignoriert", chat_id)
                 return
 
+            # /stop, /abort, /abbruch VOR dem Tageslimit parsen: ein User am Limit muss
+            # eine laufende Verarbeitung trotzdem abbrechen können. (Token-basiert, auch
+            # ':' statt '/' und /cmd@botname.)
+            import re as _re_cancel
+            _cancel_tokens = set(_re_cancel.split(r"\s+", body.strip().lower()))
+            _cancel_tokens |= {("/" + t[1:]) for t in _cancel_tokens if t.startswith(":") and len(t) > 1}
+            _cancel_tokens |= {t.split("@", 1)[0] for t in _cancel_tokens if t.startswith("/") and "@" in t}
+            _cancel_hit = _cancel_tokens & {"/stop", "/abort", "/abbruch"}
+            if _cancel_hit:
+                _cancel_cmd = sorted(_cancel_hit)[0]
+                from miniassistant.cancellation import request_cancel
+                level = "stop" if _cancel_cmd == "/stop" else "abort"
+                cancel_key = f"chan:{chat_id}" if (not is_dm and chat_id) else sender_id
+                request_cancel(cancel_key, level)
+                logger.info("Telegram: %s von %s — Cancellation (%s, key=%s)", body[:40], sender_id, level, cancel_key)
+                reply = "⏹ Verarbeitung wird abgebrochen…" if level == "abort" else "⏸ Verarbeitung wird nach aktuellem Schritt gestoppt…"
+                await _send(chat_id, reply, reply_to=msg.get("message_id"))
+                return
+
             # Per-User-Tageslimit in Gruppen
             if not is_dm:
                 from miniassistant.group_rooms import check_user_daily_limit as _chk
@@ -745,6 +783,10 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
                     await _send(chat_id, "Konnte Sprachnachricht nicht erkennen.", reply_to=msg.get("message_id"))
                     return
                 logger.info("Telegram Audio: Transkript von %s: %s", sender_id, transcript[:80])
+                if sender_id in _busy_users:
+                    await _send(chat_id, "⏳ Ich arbeite noch an deiner vorherigen Anfrage — einen Moment bitte.", reply_to=msg.get("message_id"))
+                    return
+                _busy_users.add(sender_id)
                 stop_typing = asyncio.Event()
                 typing_task = asyncio.create_task(_keep_typing(chat_id, stop_typing))
                 try:
@@ -758,6 +800,7 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
                     await _send(chat_id, f"Fehler: {e}", reply_to=msg.get("message_id"))
                     return
                 finally:
+                    _busy_users.discard(sender_id)
                     stop_typing.set()
                     await typing_task
                 if not response:
@@ -786,7 +829,10 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
 
             # Bild ohne Text → Pending speichern, User fragen
             if msg_images and not body and not msg_docs:
-                _pending_images.setdefault(sender_id, []).extend(msg_images)
+                _prune_pending()
+                _pk = f"{sender_id}|{chat_id}"
+                _pending_images.setdefault(_pk, []).extend(msg_images)
+                _pending_images_ts[_pk] = time.time()
                 await _send(chat_id, "Bild empfangen. Was soll ich damit machen?", reply_to=msg.get("message_id"))
                 return
 
@@ -805,25 +851,12 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
                                 f"Gib in der Web-UI ein: `/auth telegram {code}`")
                 return
 
-            # /stop, /abort, /abbruch: Token-basiert (auch ':' statt '/')
-            import re as _re_cancel
-            _cancel_tokens = set(_re_cancel.split(r"\s+", body.strip().lower()))
-            _cancel_tokens |= {("/" + t[1:]) for t in _cancel_tokens if t.startswith(":") and len(t) > 1}
-            _cancel_hit = _cancel_tokens & {"/stop", "/abort", "/abbruch"}
-            if _cancel_hit:
-                _cancel_cmd = sorted(_cancel_hit)[0]
-                from miniassistant.cancellation import request_cancel
-                level = "stop" if _cancel_cmd == "/stop" else "abort"
-                cancel_key = f"chan:{chat_id}" if (not is_dm and chat_id) else sender_id
-                request_cancel(cancel_key, level)
-                logger.info("Telegram: %s von %s — Cancellation (%s, key=%s)", body[:40], sender_id, level, cancel_key)
-                reply = "⏹ Verarbeitung wird abgebrochen…" if level == "abort" else "⏸ Verarbeitung wird nach aktuellem Schritt gestoppt…"
-                await _send(chat_id, reply, reply_to=msg.get("message_id"))
-                return
-
-            # Pending Images abholen
-            if not msg_images and sender_id in _pending_images:
-                msg_images = _pending_images.pop(sender_id)
+            # Pending Images abholen (nur aus dem SELBEN Chat)
+            _pend_key = f"{sender_id}|{chat_id}"
+            _prune_pending()
+            if not msg_images and _pend_key in _pending_images:
+                msg_images = _pending_images.pop(_pend_key)
+                _pending_images_ts.pop(_pend_key, None)
 
             logger.info("Telegram: Nachricht von %s (%s): %.80s", display, sender_id, body)
 
@@ -849,6 +882,10 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
 
             images_param = msg_images if msg_images else None
 
+            if sender_id in _busy_users:
+                await _send(chat_id, "⏳ Ich arbeite noch an deiner vorherigen Anfrage — einen Moment bitte.", reply_to=msg.get("message_id"))
+                return
+            _busy_users.add(sender_id)
             stop_typing = asyncio.Event()
             typing_task = asyncio.create_task(_keep_typing(chat_id, stop_typing))
             try:
@@ -861,6 +898,7 @@ async def run_telegram_bot(config: dict[str, Any]) -> None:
                 logger.exception("Telegram KI-Antwort fehlgeschlagen: %s", e)
                 reply = f"Fehler bei der Verarbeitung: {e}"
             finally:
+                _busy_users.discard(sender_id)
                 stop_typing.set()
                 await typing_task
 

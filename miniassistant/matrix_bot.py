@@ -167,15 +167,6 @@ async def _fetch_inviter(client: Any, room_id: str, bot_user_id: str) -> str | N
     return invite_sender
 
 
-def get_room_inviter(room_id: str) -> str | None:
-    """Sync, cached-only lookup. Returns None if not yet cached."""
-    return _inviter_cache.get(room_id)
-
-
-def get_inviter_cache() -> dict[str, str | None]:
-    return dict(_inviter_cache)
-
-
 def list_joined_rooms() -> list[dict[str, Any]]:
     """List currently joined Matrix rooms with display name + member count + auth info for non-bot users.
     Returns [] if bot is not running. Safe to call from any thread."""
@@ -630,6 +621,21 @@ def search_chat_history(
         return {"hits": [], "scanned": 0, "encrypted_skipped": 0, "query": query, "diagnostic": f"exception: {e}"}
 
 
+def _pick_user_room(cl: Any, target_user_id: str) -> str | None:
+    """Best room for a user-targeted send: prefer 2-member rooms (DM with the bot),
+    fall back to the first room containing the user (avoids owner pings landing in groups)."""
+    rooms = getattr(cl, "rooms", {}) or {}
+    fallback: str | None = None
+    for rid, room in rooms.items():
+        members = getattr(room, "users", {}) or {}
+        if target_user_id in members:
+            if len(members) == 2:
+                return rid
+            if fallback is None:
+                fallback = rid
+    return fallback
+
+
 def send_message_to_user(target_user_id: str, message: str) -> bool:
     """Thread-safe: Sendet eine Nachricht ueber den laufenden Bot-Client (mit E2EE).
     Wird von notify.py aufgerufen. Gibt True bei Erfolg zurueck."""
@@ -639,14 +645,12 @@ def send_message_to_user(target_user_id: str, message: str) -> bool:
 
     async def _do_send() -> bool:
         cl = _bot_client
-        # Raum finden: joined_rooms durchsuchen
-        rooms = getattr(cl, "rooms", {}) or {}
-        for rid, room in rooms.items():
-            members = getattr(room, "users", {}) or {}
-            if target_user_id in members:
-                await _bot_send_fn(cl, rid, message)
-                return True
+        rid = _pick_user_room(cl, target_user_id)
+        if rid:
+            await _bot_send_fn(cl, rid, message)
+            return True
         # Fallback: invited_members pruefen
+        rooms = getattr(cl, "rooms", {}) or {}
         for rid, room in rooms.items():
             invited = getattr(room, "invited_users", {}) or {}
             if target_user_id in invited:
@@ -739,12 +743,11 @@ def send_image_to_user(target_user_id: str, image_path: str, caption: str = "") 
 
     async def _do_send() -> bool:
         cl = _bot_client
+        rid = _pick_user_room(cl, target_user_id)
+        if rid:
+            await _bot_send_image_fn(cl, rid, image_path, caption)
+            return True
         rooms = getattr(cl, "rooms", {}) or {}
-        for rid, room in rooms.items():
-            members = getattr(room, "users", {}) or {}
-            if target_user_id in members:
-                await _bot_send_image_fn(cl, rid, image_path, caption)
-                return True
         for rid, room in rooms.items():
             invited = getattr(room, "invited_users", {}) or {}
             if target_user_id in invited:
@@ -784,12 +787,11 @@ def send_audio_to_user(target_user_id: str, wav_bytes: bytes) -> bool:
 
     async def _do_send() -> bool:
         cl = _bot_client
+        rid = _pick_user_room(cl, target_user_id)
+        if rid:
+            await _bot_send_audio_fn(cl, rid, wav_bytes)
+            return True
         rooms = getattr(cl, "rooms", {}) or {}
-        for rid, room in rooms.items():
-            members = getattr(room, "users", {}) or {}
-            if target_user_id in members:
-                await _bot_send_audio_fn(cl, rid, wav_bytes)
-                return True
         for rid, room in rooms.items():
             invited = getattr(room, "invited_users", {}) or {}
             if target_user_id in invited:
@@ -859,6 +861,7 @@ def _get_chat_response(
     images: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
     member_count: int = 0,
+    trigger_event_id: str | None = None,
 ) -> str:
     """Synchroner Aufruf: Session per (room_id, matrix_user_id), handle_user_input.
     Gibt **ausschließlich** den sichtbaren Content zurück – KEIN Thinking für Matrix.
@@ -908,9 +911,16 @@ def _get_chat_response(
                 bot_user_id = getattr(_bot_client, "user_id", None) or getattr(_bot_client, "user", None) or ""
                 _frm = fetch_recent_messages(room_id, limit=ac_count + 1)
                 prev = _frm.get("messages") or [] if isinstance(_frm, dict) else (_frm or [])
-                # Trigger-Nachricht (letzte vom aktuellen Sender mit gleichem Body) entfernen falls anwesend
-                if prev and prev[-1].get("sender") == matrix_user_id and (prev[-1].get("body") or "").strip() == user_message.strip():
-                    prev = prev[:-1]
+                # Trigger-Nachricht entfernen: per event_id oder sender+body-Match in den
+                # letzten 5 Einträgen (nicht nur dem letzten — Reihenfolge kann drifted sein).
+                _um = user_message.strip()
+                for _i in range(len(prev) - 1, max(0, len(prev) - 5) - 1, -1):
+                    _pm = prev[_i]
+                    if (trigger_event_id and _pm.get("event_id") == trigger_event_id) or (
+                        _pm.get("sender") == matrix_user_id and (_pm.get("body") or "").strip() == _um
+                    ):
+                        prev.pop(_i)
+                        break
                 prev = prev[-ac_count:] if len(prev) > ac_count else prev
                 blk = format_auto_context(prev, max_chars=ac_max, bot_sender=bot_user_id, max_age_min=ac_age)
                 from miniassistant.room_images import format_block as _ri_block
@@ -927,8 +937,12 @@ def _get_chat_response(
     if room_id:
         config["_chat_context"] = ctx
     # Group-Mode: stateless — jeder Turn frische Session (auto-context + read_recent_messages liefern Kontext).
-    if ctx.get("group_mode") or session_key not in sessions:
+    # Agent-Räume: Session neu bauen wenn Raum-Settings (Kontext/Sprache/Modell) sich geändert haben —
+    # sonst klebt der alte System-Prompt/das alte Modell bis zum /new.
+    _room_sig = f"{rs.get('context')}|{rs.get('language')}|{rs.get('model')}"
+    if ctx.get("group_mode") or session_key not in sessions or sessions[session_key].get("_room_sig") != _room_sig:
         sessions[session_key] = create_session(config, None)
+        sessions[session_key]["_room_sig"] = _room_sig
     session = sessions[session_key]
     if room_id:
         session["chat_context"] = ctx
@@ -1393,7 +1407,7 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             doc["_group_pending"] = True
             doc["_pending_ts"] = _t_p_d.time()
             _prune_stale_pending()
-        _pending_docs.setdefault(sender, []).append(doc)
+        _pending_docs.setdefault(f"{sender}|{room_id}", []).append(doc)
         n_chars = len(doc.get("text") or "")
         n_imgs = len(doc.get("images") or [])
         info_msg = f"Dokument empfangen ({n_chars} Zeichen"
@@ -1468,8 +1482,8 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
             img_data["_group_pending"] = True
             img_data["_pending_ts"] = _t_p.time()
             _prune_stale_pending()  # opportunistisch alte raustun
-        # Pending Image speichern – nächste Textnachricht bekommt es
-        _pending_images.setdefault(sender, []).append(img_data)
+        # Pending Image speichern – nächste Textnachricht (im selben Raum) bekommt es
+        _pending_images.setdefault(f"{sender}|{room_id}", []).append(img_data)
         if not _is_group_img:
             await _send_room_message(client, room_id, "Bild empfangen 📷 Schreib mir, was ich damit machen soll — oder lade noch weitere Bilder hoch, dann schau ich sie mir zusammen an.")
         else:
@@ -1552,7 +1566,9 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
         try:
             from miniassistant import wyoming_client as _wyoming
             lang = get_voice_language(config)
-            transcript = _wyoming.transcribe(audio_bytes, stt_url, language=lang)
+            # Blocking socket/ffmpeg I/O — never run directly in the sync loop
+            transcript = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _wyoming.transcribe(audio_bytes, stt_url, language=lang))
         except Exception as e:
             logger.exception("Matrix Audio: STT fehlgeschlagen")
             await _stop_typing()
@@ -1566,10 +1582,19 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
         # Agent aufrufen (mit [Voice]-Prefix)
         _room_obj_v = (getattr(client, "rooms", {}) or {}).get(room_id)
         _mc_v = len(getattr(_room_obj_v, "users", {}) or {}) if _room_obj_v else 0
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda mc=_mc_v: _get_chat_response(config, sender, f"[Voice] {transcript}", matrix_sessions, room_id=room_id, member_count=mc),
-        )
+        # Same per-sender busy guard as the text path — two parallel runs on one session corrupt history
+        if sender in _busy_users:
+            await _stop_typing()
+            await _send_room_message(client, room_id, "⏳ Ich arbeite noch an deiner vorherigen Anfrage — einen Moment bitte.")
+            return
+        _busy_users.add(sender)
+        try:
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda mc=_mc_v: _get_chat_response(config, sender, f"[Voice] {transcript}", matrix_sessions, room_id=room_id, member_count=mc),
+            )
+        finally:
+            _busy_users.discard(sender)
         if not response:
             await _stop_typing()
             return
@@ -1581,7 +1606,8 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
         if tts_url and voice_text:
             try:
                 tts_voice = get_voice_tts_voice(config)
-                wav_bytes = _wyoming.synthesize(voice_text, tts_url, voice=tts_voice)
+                wav_bytes = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _wyoming.synthesize(voice_text, tts_url, voice=tts_voice))
                 # Audio hochladen und als m.audio senden
                 import io as _io
                 upload_resp = await client.upload(_io.BytesIO(wav_bytes), content_type="audio/wav", filename="response.wav", filesize=len(wav_bytes))
@@ -1817,9 +1843,10 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
         else:
             _busy_users.add(sender)
             try:
-                # Pending Images + Documents abholen
-                msg_images = _pending_images.pop(sender, None) or None
-                msg_docs = _pending_docs.pop(sender, None) or None
+                # Pending Images + Documents abholen (keyed by sender+room — kein Cross-Chat-Leak)
+                _pend_key = f"{sender}|{room_id}"
+                msg_images = _pending_images.pop(_pend_key, None) or None
+                msg_docs = _pending_docs.pop(_pend_key, None) or None
                 # Reply-to-Image: wenn User dieses Event als Reply auf ein älteres m.image
                 # gesendet hat (Matrix-Quote-UI), das gequotete Bild auflösen + an msg_images anhängen
                 # damit Bot sieht WAS gequotet wurde.
@@ -1888,9 +1915,10 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
                             pass
                     typing_task = asyncio.create_task(_keep_typing())
                 try:
+                    _trig_eid = getattr(event, "event_id", None)
                     reply = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda s=sender, b=body, imgs=msg_images, rid=room_id, mc=len(room_members): _get_chat_response(config, s, b, matrix_sessions, images=imgs, room_id=rid, member_count=mc),
+                        lambda s=sender, b=body, imgs=msg_images, rid=room_id, mc=len(room_members), eid=_trig_eid: _get_chat_response(config, s, b, matrix_sessions, images=imgs, room_id=rid, member_count=mc, trigger_event_id=eid),
                     )
                 except Exception as e:
                     logger.exception("Matrix KI-Antwort fehlgeschlagen: %s", e)
@@ -2010,13 +2038,16 @@ async def run_matrix_bot(config: dict[str, Any]) -> None:
     for _rid in [k for k, v in list(_inviter_cache.items()) if v is None]:
         _inviter_cache.pop(_rid, None)
 
-    # Initialer Sync + Key-Upload BEVOR Callbacks registriert werden,
-    # damit (a) alte Nachrichten nicht erneut beantwortet werden und
-    # (b) die Device-Keys des Bots am Server bekannt sind.
+    # Initialer Sync BEVOR Callbacks registriert werden, damit alte Nachrichten
+    # nicht erneut beantwortet werden — auch OHNE olm (kein persistenter Sync-Token
+    # bei encrypted_rooms:false → sonst Replay des Timelines bei jedem Restart).
+    logger.info("Matrix: Initialer Drain-Sync …")
+    try:
+        await client.sync(timeout=30000, full_state=True)
+    except Exception as e:
+        logger.warning("Matrix: Initialer Sync fehlgeschlagen: %s – Bot startet trotzdem.", e)
     if getattr(client, "olm", None):
-        logger.info("Matrix: Initialer Sync + E2EE Key-Upload …")
         try:
-            await client.sync(timeout=30000, full_state=True)
             await _e2ee_keys()
             logger.info(
                 "Matrix: E2EE-Keys am Server registriert – "

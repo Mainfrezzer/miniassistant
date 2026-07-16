@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from miniassistant.config import load_config
 from miniassistant.agent_loader import build_system_prompt
-from miniassistant.ollama_client import resolve_model, get_provider_config, get_provider_type
+from miniassistant.ollama_client import resolve_model
 from miniassistant.chat_loop import (
     chat_round,
     chat_round_stream,
@@ -55,8 +55,12 @@ def _strip_tool_call_xml(content: str) -> str:
     content = _re.sub(r'<tools>.*?</tools>', '', content, flags=_re.DOTALL)
     content = _re.sub(r'<function=\w+>.*?</function>(?:\s*</tool_call>)?', '', content, flags=_re.DOTALL)
     for _st in ("exec", "web_search", "read_url", "check_url"):
-        content = _re.sub(rf'<{_st}[^>]*>.*?</{_st}>', '', content, flags=_re.DOTALL)
-        content = _re.sub(rf'<{_st}[^>]*>.*', '', content, flags=_re.DOTALL)
+        # Exact tag name only (next char must be whitespace or '>') — '<exec'
+        # darf nicht '<executive summary>' o.ä. treffen.
+        content = _re.sub(rf'<{_st}(?=[\s>])[^>]*>.*?</{_st}>', '', content, flags=_re.DOTALL)
+        # Unclosed Tag: nur strippen wenn er am Content-ENDE öffnet (abgeschnittener
+        # Tool-Call), nie Prosa bis EOF wegkürzen.
+        content = _re.sub(rf'<{_st}(?=[\s>])[^<]*$', '', content)
     return content.strip()
 
 router = APIRouter(prefix="/v1", tags=["OpenAI-compatible"])
@@ -257,12 +261,13 @@ def _make_response(
     if usage:
         resp["usage"] = usage
     else:
-        # Grobe Schaetzung (kein echter Tokenizer)
-        prompt_tokens = max(1, len(content) // 4)
+        # Kein Tokenizer hier: completion grob schätzen, prompt_tokens NICHT aus
+        # der Completion-Länge erfinden — 0 melden wenn unbekannt.
+        completion_tokens = max(1, len(content) // 4)
         resp["usage"] = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": max(1, len(content) // 4),
-            "total_tokens": prompt_tokens + max(1, len(content) // 4),
+            "prompt_tokens": 0,
+            "completion_tokens": completion_tokens,
+            "total_tokens": completion_tokens,
         }
     return resp
 

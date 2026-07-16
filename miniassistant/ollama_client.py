@@ -198,7 +198,11 @@ def resolve_model(config: dict[str, Any], model: str | None, _depth: int = 0) ->
         if real_key:
             prov_models = providers[real_key].get("models") or {}
             aliases = prov_models.get("aliases") or {}
-            resolved = aliases.get(clean, clean)
+            # Alias-Ketten rekursiv auflösen (wie im prefixlosen Pfad), Zyklen-Guard via _depth
+            resolved = clean
+            while _depth < 10 and resolved in aliases and aliases[resolved] != resolved:
+                resolved = aliases[resolved]
+                _depth += 1
             return f"{real_key}/{resolved}"
     # Kein Prefix → Alias in allen Providern suchen
     default_name = next(iter(providers), "ollama")
@@ -830,6 +834,32 @@ def _tools_schema(
             },
         },
     })
+    # device_action: nur wenn die Anfrage von einem Geräte-Client kommt (z.B. Echo Show)
+    if (config.get("_chat_context") or {}).get("device_id"):
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": "device_action",
+                "description": (
+                    "Execute an action on the user's smart display device (the device this request came from). "
+                    "The action runs on the device right after your reply is delivered — also give a short spoken confirmation. "
+                    "Actions: "
+                    "open_app (arg = Android package name or app name, e.g. 'org.schabi.newpipe' or 'NewPipe'); "
+                    "media (arg = play|pause|playpause|next|prev|stop — controls whatever media app is currently playing); "
+                    "volume (arg = 0-100, or 'up'/'down'); "
+                    "play_url (arg = direct audio stream URL, e.g. internet radio — the device plays it natively); "
+                    "stop_playback (stops a stream started via play_url; no arg)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "open_app | media | volume | play_url | stop_playback"},
+                        "arg": {"type": "string", "description": "Argument for the action (see description)"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        })
     # send_audio: nur wenn TTS konfiguriert
     from miniassistant.config import get_voice_tts_url as _get_tts_url
     if _get_tts_url(config):

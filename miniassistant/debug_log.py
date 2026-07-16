@@ -5,9 +5,12 @@ Serve-Ereignisse in Dateien unter debug/ geschrieben (Rohformat).
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger("miniassistant.debug_log")
 
 
 def _debug_dir(config: dict[str, Any], project_dir: str | None = None) -> Path | None:
@@ -39,9 +42,10 @@ def log_chat(
         path = d / "chat.log"
         ts = datetime.now(timezone.utc).isoformat()
         block = f"\n--- {label} {ts} ---\nREQUEST:\n{json.dumps(request_obj, ensure_ascii=False, indent=2)}\nRESPONSE:\n{json.dumps(response_obj, ensure_ascii=False, indent=2)}\n"
-        path.write_text(path.read_text(encoding="utf-8") + block, encoding="utf-8")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(block)
     except Exception:
-        pass
+        _log.warning("debug chat.log write failed", exc_info=True)
 
 
 def log_serve(message: str, config: dict[str, Any], project_dir: str | None = None) -> None:
@@ -53,6 +57,7 @@ def log_serve(message: str, config: dict[str, Any], project_dir: str | None = No
         d.mkdir(parents=True, exist_ok=True)
         path = d / "serve.log"
         ts = datetime.now(timezone.utc).isoformat()
-        path.write_text(path.read_text(encoding="utf-8") + f"{ts}\t{message}\n", encoding="utf-8")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{message}\n")
     except Exception:
-        pass
+        _log.warning("debug serve.log write failed", exc_info=True)

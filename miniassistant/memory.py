@@ -63,37 +63,6 @@ def memory_dir(project_dir: str | None = None) -> Path:
     return Path(agent).expanduser().resolve() / "memory"
 
 
-def save_summary(summary: str, model_used: str | None = None, project_dir: str | None = None) -> Path | None:
-    """Speichert eine kurze Zusammenfassung (z. B. bei Modellwechsel)."""
-    if not _memory_enabled(project_dir):
-        return None
-    d = memory_dir(project_dir)
-    d.mkdir(parents=True, exist_ok=True)
-    meta: dict[str, Any] = {"summary": summary}
-    if model_used:
-        meta["last_model"] = model_used
-    path = d / "last_summary.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=0)
-    return path
-
-
-def load_summary(project_dir: str | None = None) -> tuple[str | None, str | None]:
-    """Liest letzte Zusammenfassung und (falls gespeichert) last_model. (summary, last_model)."""
-    if not _memory_enabled(project_dir):
-        return None, None
-    d = memory_dir(project_dir)
-    path = d / "last_summary.json"
-    if not path.exists():
-        return None, None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("summary"), data.get("last_model")
-    except Exception:
-        return None, None
-
-
 def _today_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -364,9 +333,13 @@ def init_mempalace(project_dir: str | None = None) -> str:
     return palace_path
 
 
+_USER_LINE_RE = re.compile(r"^User(?: \[([^\]]+)\])?: ")
+
+
 def _parse_exchanges_from_md(text: str) -> list[tuple[str, str]]:
     """Parst User/Assistant-Paare aus einer täglichen Memory-Datei.
 
+    Akzeptiert "User: ..." und "User [<user_id>]: ..." (Tag bleibt erhalten).
     Returns: Liste von (user_content, assistant_content) Tuples.
     """
     exchanges: list[tuple[str, str]] = []
@@ -374,15 +347,17 @@ def _parse_exchanges_from_md(text: str) -> list[tuple[str, str]]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith("User: "):
-            user_text = line[6:].strip()
+        m = _USER_LINE_RE.match(line)
+        if m:
+            body = line[m.end():].strip()
+            user_text = f"[{m.group(1)}] {body}" if m.group(1) else body
             i += 1
             asst_lines: list[str] = []
             if i < len(lines) and lines[i].startswith("Assistant: "):
                 asst_lines.append(lines[i][11:])
                 i += 1
-                while i < len(lines) and not lines[i].startswith("User: "):
-                    if lines[i].strip() == "" and i + 1 < len(lines) and lines[i + 1].startswith("User: "):
+                while i < len(lines) and not _USER_LINE_RE.match(lines[i]):
+                    if lines[i].strip() == "" and i + 1 < len(lines) and _USER_LINE_RE.match(lines[i + 1]):
                         break
                     asst_lines.append(lines[i])
                     i += 1

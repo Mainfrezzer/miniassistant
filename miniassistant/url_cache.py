@@ -90,10 +90,6 @@ class UrlCache:
         if evt is not None:
             evt.set()
 
-    def urls(self) -> list[str]:
-        with self._lock:
-            return list(self._store.keys())
-
     def stats(self) -> dict[str, int]:
         with self._lock:
             return {
@@ -105,16 +101,6 @@ class UrlCache:
                 "dedup_waits": self.dedup_waits,
                 "inflight": len(self._inflight),
             }
-
-    def clear(self) -> None:
-        with self._lock:
-            self._store.clear()
-            self._current_bytes = 0
-            pending = list(self._inflight.values())
-            self._inflight.clear()
-        for evt in pending:
-            evt.set()
-
 
 def get_cache(config: dict[str, Any]) -> UrlCache:
     """Fetch or create session-scoped cache in config['_chat_context']."""

@@ -35,7 +35,10 @@ from miniassistant.ollama_client import resolve_model, get_base_url_for_model
 
 _log = logging.getLogger("miniassistant.slot_cache")
 
-_lock = threading.Lock()
+# RLock: mutating entry points hold it across the full load-modify-save cycle
+# (save_after_round threads run parallel to cleanup loops → lost updates otherwise);
+# _load_state/_save_state re-acquire it internally.
+_lock = threading.RLock()
 _slot_cache_response_cache: dict[str, tuple[float, Any]] = {}  # url -> (ts, slots)
 _SLOTS_CACHE_TTL = 3.0  # s — kurz, damit parallel-Requests gemeinsam einen GET nutzen
 
@@ -157,10 +160,11 @@ def _maybe_reset_stats(stats: dict[str, Any]) -> None:
 def _bump_stat(config: dict[str, Any], key: str) -> None:
     """Inkrementiert einen Stat-Counter im State."""
     try:
-        data = _load_state(config)
-        _maybe_reset_stats(data["stats"])
-        data["stats"][key] = int(data["stats"].get(key, 0)) + 1
-        _save_state(config, data)
+        with _lock:
+            data = _load_state(config)
+            _maybe_reset_stats(data["stats"])
+            data["stats"][key] = int(data["stats"].get(key, 0)) + 1
+            _save_state(config, data)
     except Exception as e:
         _log.debug("slot_cache: stat bump failed: %s", e)
 
@@ -447,25 +451,26 @@ def save_after_round(
             _log.warning("slot_cache: save HTTP failed: %s", e)
             return False
 
-        # Update State
-        data = _load_state(config)
-        now = int(time.time())
-        # Existing entry für (conv_id, model_norm) entfernen, neuen anhängen
-        data["entries"] = [
-            e for e in data["entries"]
-            if not (e.get("conv_id") == conv_id and e.get("model") == model_norm)
-        ]
-        data["entries"].append({
-            "conv_id": conv_id,
-            "model": model_norm,
-            "filename": filename,
-            "prompt_token_count": int(prompt_token_count),
-            "last_used_ts": now,
-            "created_ts": now,
-        })
-        _maybe_reset_stats(data["stats"])
-        data["stats"]["saves_7d"] = int(data["stats"].get("saves_7d", 0)) + 1
-        _save_state(config, data)
+        # Update State (lock across full read-modify-write)
+        with _lock:
+            data = _load_state(config)
+            now = int(time.time())
+            # Existing entry für (conv_id, model_norm) entfernen, neuen anhängen
+            data["entries"] = [
+                e for e in data["entries"]
+                if not (e.get("conv_id") == conv_id and e.get("model") == model_norm)
+            ]
+            data["entries"].append({
+                "conv_id": conv_id,
+                "model": model_norm,
+                "filename": filename,
+                "prompt_token_count": int(prompt_token_count),
+                "last_used_ts": now,
+                "created_ts": now,
+            })
+            _maybe_reset_stats(data["stats"])
+            data["stats"]["saves_7d"] = int(data["stats"].get("saves_7d", 0)) + 1
+            _save_state(config, data)
         _log.info("slot_cache: saved %s tokens=%d slot=%d", filename, prompt_token_count, slot_id)
         # Cleanup nach Save (LRU + TTL)
         cleanup_lru_and_ttl(config)
@@ -491,9 +496,9 @@ def restore_before_round(
             return False
 
         model_norm = normalize_model_name(config, model)
-        data = _load_state(config)
         entry = next(
-            (e for e in data["entries"] if e.get("conv_id") == conv_id and e.get("model") == model_norm),
+            (e for e in _load_state(config)["entries"]
+             if e.get("conv_id") == conv_id and e.get("model") == model_norm),
             None,
         )
         if not entry:
@@ -532,9 +537,14 @@ def restore_before_round(
                 return False
             if r.status_code != 200:
                 _log.info("slot_cache: restore failed %s status=%s — dropping entry", filename, r.status_code)
-                # File evtl. weg auf LLM-Server → DB-Entry löschen
-                data["entries"] = [e for e in data["entries"] if e is not entry]
-                _save_state(config, data)
+                # File evtl. weg auf LLM-Server → DB-Entry löschen (frischer RMW unter Lock)
+                with _lock:
+                    data = _load_state(config)
+                    data["entries"] = [
+                        e for e in data["entries"]
+                        if not (e.get("conv_id") == conv_id and e.get("model") == model_norm)
+                    ]
+                    _save_state(config, data)
                 _bump_stat(config, "misses_7d")
                 return False
         except Exception as e:
@@ -542,11 +552,20 @@ def restore_before_round(
             _bump_stat(config, "misses_7d")
             return False
 
-        # touch last_used_ts
-        entry["last_used_ts"] = int(time.time())
-        _maybe_reset_stats(data["stats"])
-        data["stats"]["hits_7d"] = int(data["stats"].get("hits_7d", 0)) + 1
-        _save_state(config, data)
+        # touch last_used_ts + hit-counter (frischer RMW unter Lock — nicht die Kopie
+        # von vor dem HTTP-Call zurückschreiben, sonst Lost-Update)
+        with _lock:
+            data = _load_state(config)
+            cur = next(
+                (e for e in data["entries"]
+                 if e.get("conv_id") == conv_id and e.get("model") == model_norm),
+                None,
+            )
+            if cur:
+                cur["last_used_ts"] = int(time.time())
+            _maybe_reset_stats(data["stats"])
+            data["stats"]["hits_7d"] = int(data["stats"].get("hits_7d", 0)) + 1
+            _save_state(config, data)
         _log.info("slot_cache: restored %s into slot=%d", filename, free_id)
         return True
     except Exception as e:
@@ -559,19 +578,21 @@ def invalidate(config: dict[str, Any], conv_id: str, model: str | None = None) -
     Returns Anzahl entfernter Entries.
     """
     try:
-        data = _load_state(config)
-        before = len(data["entries"])
-        if model:
-            model_norm = normalize_model_name(config, model)
-            data["entries"] = [
-                e for e in data["entries"]
-                if not (e.get("conv_id") == conv_id and e.get("model") == model_norm)
-            ]
-        else:
-            data["entries"] = [e for e in data["entries"] if e.get("conv_id") != conv_id]
-        removed = before - len(data["entries"])
+        with _lock:
+            data = _load_state(config)
+            before = len(data["entries"])
+            if model:
+                model_norm = normalize_model_name(config, model)
+                data["entries"] = [
+                    e for e in data["entries"]
+                    if not (e.get("conv_id") == conv_id and e.get("model") == model_norm)
+                ]
+            else:
+                data["entries"] = [e for e in data["entries"] if e.get("conv_id") != conv_id]
+            removed = before - len(data["entries"])
+            if removed:
+                _save_state(config, data)
         if removed:
-            _save_state(config, data)
             _log.info("slot_cache: invalidated %d entries for conv=%s", removed, conv_id)
         return removed
     except Exception as e:
@@ -594,17 +615,19 @@ def cleanup_lru_and_ttl(config: dict[str, Any]) -> int:
         ttl_days = int(gcfg.get("ttl_days", 14) or 14)
         ttl_cutoff = int(time.time()) - ttl_days * 86400
 
-        data = _load_state(config)
-        before = len(data["entries"])
-        # TTL
-        data["entries"] = [e for e in data["entries"] if int(e.get("last_used_ts", 0)) >= ttl_cutoff]
-        # LRU bei Überschreitung von max_files
-        if len(data["entries"]) > max_files:
-            data["entries"].sort(key=lambda e: int(e.get("last_used_ts", 0)), reverse=True)
-            data["entries"] = data["entries"][:max_files]
-        removed = before - len(data["entries"])
+        with _lock:
+            data = _load_state(config)
+            before = len(data["entries"])
+            # TTL
+            data["entries"] = [e for e in data["entries"] if int(e.get("last_used_ts", 0)) >= ttl_cutoff]
+            # LRU bei Überschreitung von max_files
+            if len(data["entries"]) > max_files:
+                data["entries"].sort(key=lambda e: int(e.get("last_used_ts", 0)), reverse=True)
+                data["entries"] = data["entries"][:max_files]
+            removed = before - len(data["entries"])
+            if removed:
+                _save_state(config, data)
         if removed:
-            _save_state(config, data)
             _log.info("slot_cache: cleanup removed %d entries (TTL+LRU)", removed)
         return removed
     except Exception as e:
@@ -613,13 +636,19 @@ def cleanup_lru_and_ttl(config: dict[str, Any]) -> int:
 
 
 def cleanup_unknown_models(config: dict[str, Any]) -> int:
-    """Entfernt Entries deren Modell nicht mehr in config.providers existiert."""
+    """Entfernt Entries deren Modell nicht mehr in config.providers existiert.
+
+    Nur wenn JEDER Provider eine explizite models.list hat — bei server-discovered
+    Modellen (list nicht gesetzt) ist die Menge unbekannt und valide Entries würden
+    fälschlich gepurgt."""
     try:
         known: set[str] = set()
         for prov_name, prov_cfg in (config.get("providers") or {}).items():
             if not isinstance(prov_cfg, dict):
                 continue
             models = prov_cfg.get("models") or {}
+            if not models.get("list"):
+                return 0  # discovery-Provider → known-set nicht autoritativ
             default = (models.get("default") or "").strip()
             if default:
                 known.add(default)
@@ -631,12 +660,14 @@ def cleanup_unknown_models(config: dict[str, Any]) -> int:
                     known.add(tgt)
         if not known:
             return 0
-        data = _load_state(config)
-        before = len(data["entries"])
-        data["entries"] = [e for e in data["entries"] if e.get("model") in known]
-        removed = before - len(data["entries"])
+        with _lock:
+            data = _load_state(config)
+            before = len(data["entries"])
+            data["entries"] = [e for e in data["entries"] if e.get("model") in known]
+            removed = before - len(data["entries"])
+            if removed:
+                _save_state(config, data)
         if removed:
-            _save_state(config, data)
             _log.info("slot_cache: removed %d entries for unknown models", removed)
         return removed
     except Exception as e:

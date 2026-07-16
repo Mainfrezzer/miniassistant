@@ -218,7 +218,7 @@ def _extract_docx(data: bytes, out: dict[str, Any], *, max_chars: int) -> None:
 def format_document_block(doc: dict[str, Any]) -> str:
     """Wrappt extrahierten Text als <doc>-Block fuer den Prompt.
     Wird von chat_loop beim History-Save wieder gestrippt."""
-    name = doc.get("name") or "anhang"
+    name = (doc.get("name") or "anhang").replace('"', "&quot;")
     text = doc.get("text") or ""
     if not text:
         return ""

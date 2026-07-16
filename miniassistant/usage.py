@@ -84,11 +84,16 @@ def load(after: datetime | None = None, before: datetime | None = None) -> list[
                         break
                     continue
                 _past_end = 0
+                # Defensive parse: truncated rows yield None (DictReader restval) → skip
+                try:
+                    seconds = float(row.get("seconds") or 0)
+                except (TypeError, ValueError):
+                    continue
                 rows.append({
                     "ts": ts,
-                    "model": row.get("model", ""),
-                    "type": row.get("type", "chat"),
-                    "seconds": float(row.get("seconds", 0)),
+                    "model": row.get("model") or "",
+                    "type": row.get("type") or "chat",
+                    "seconds": seconds,
                     "scope": row.get("scope") or "owner",
                 })
     except OSError:

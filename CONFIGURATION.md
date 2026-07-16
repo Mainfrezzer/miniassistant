@@ -1423,7 +1423,6 @@ opencode:
   default_repo: /root/miniassistant   # Repo, wenn der Task keins nennt
   max_concurrent: 3                    # gleichzeitig laufende Jobs (Kosten/Last-Deckel)
   max_runtime: 1200                    # Sekunden pro Job, danach Kill (timeout)
-  max_retries: 2                       # Auto-Retry NUR bei timeout/crash
   presets:                             # benannte Model-/Agent-Bündel
     coder:
       model: ollama/qwen3-coder-next-80b
@@ -1480,7 +1479,7 @@ OpenCode hat ein eigenes **Agent-System** (`opencode agent create` / `opencode a
 
 - Jeder Job läuft in einem eigenen **git-worktree** (`--detach` von HEAD) → parallele Edits kollidieren nicht, Prod-Baum bleibt sauber.
 - **Restart-fest:** Der Bot hält kein Prozess-Handle über Neustarts. Jobs schreiben ihren Exit-Code in eine Sentinel-Datei; Status wird aus Sentinel + PID-Liveness (Prozessgruppe) rekonstruiert.
-- **Deckel:** `max_concurrent` (Last/Kosten), `max_runtime` (Kill bei Überlauf), `max_retries` (Auto-Retry nur bei `timeout`/`crash`, **nicht** bei `failed` — rote Tests brauchen einen korrigierten Prompt, kein blindes Re-Run).
+- **Deckel:** `max_concurrent` (Last/Kosten), `max_runtime` (Kill bei Überlauf). Bei `timeout`/`crash`/`failed`: neuen `code_task` mit korrigiertem Prompt starten (kein Auto-Retry).
 
 ### Vorteile ggü. `exec` im Hauptagent
 

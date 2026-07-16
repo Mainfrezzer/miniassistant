@@ -32,6 +32,9 @@ if not logger.handlers:
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _OUTPUT_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
 
+# Guards read-modify-write on webhooks.json
+_file_lock = threading.Lock()
+
 # Per-webhook lock for serialized mode
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -134,40 +137,42 @@ def add_webhook(
     name = (name or "").strip()
     if name and not _NAME_RE.match(name):
         return False, "name must match ^[a-z0-9][a-z0-9_-]{0,63}$"
-    items = _load()
-    if name and any(w.get("name") == name for w in items):
-        return False, f"name '{name}' already exists"
-    wid = uuid.uuid4().hex
-    item = {
-        "id": wid,
-        "name": name or None,
-        "token": secrets.token_urlsafe(32),
-        "prompt": (prompt or "").strip(),
-        "client": client,
-        "room_id": room_id,
-        "channel_id": channel_id,
-        "model": (model or "").strip() or None,
-        "silent": bool(silent),
-        "save_output": bool(save_output),
-        "created_at": datetime.now().astimezone().isoformat(),
-        "last_fired": None,
-        "last_error": None,
-    }
-    items.append(item)
-    _save(items)
+    with _file_lock:
+        items = _load()
+        if name and any(w.get("name") == name for w in items):
+            return False, f"name '{name}' already exists"
+        wid = uuid.uuid4().hex
+        item = {
+            "id": wid,
+            "name": name or None,
+            "token": secrets.token_urlsafe(32),
+            "prompt": (prompt or "").strip(),
+            "client": client,
+            "room_id": room_id,
+            "channel_id": channel_id,
+            "model": (model or "").strip() or None,
+            "silent": bool(silent),
+            "save_output": bool(save_output),
+            "created_at": datetime.now().astimezone().isoformat(),
+            "last_fired": None,
+            "last_error": None,
+        }
+        items.append(item)
+        _save(items)
     return True, item
 
 
 def remove_webhook(wid_or_prefix: str, *, purge_outputs: bool = False) -> tuple[bool, str]:
-    items = _load()
-    matches = [w for w in items if (w.get("id") or "").startswith(wid_or_prefix) or w.get("name") == wid_or_prefix]
-    if not matches:
-        return False, "not found"
-    if len(matches) > 1:
-        return False, f"{len(matches)} matches — be more specific"
-    target = matches[0]
-    remaining = [w for w in items if w.get("id") != target.get("id")]
-    _save(remaining)
+    with _file_lock:
+        items = _load()
+        matches = [w for w in items if (w.get("id") or "").startswith(wid_or_prefix) or w.get("name") == wid_or_prefix]
+        if not matches:
+            return False, "not found"
+        if len(matches) > 1:
+            return False, f"{len(matches)} matches — be more specific"
+        target = matches[0]
+        remaining = [w for w in items if w.get("id") != target.get("id")]
+        _save(remaining)
     if purge_outputs:
         try:
             d = _output_dir(target)
@@ -182,21 +187,22 @@ def remove_webhook(wid_or_prefix: str, *, purge_outputs: bool = False) -> tuple[
 
 
 def update_webhook(wid: str, patch: dict[str, Any]) -> tuple[bool, str]:
-    items = _load()
-    target = next((w for w in items if w.get("id") == wid), None)
-    if not target:
-        return False, "not found"
-    for k in ("name", "prompt", "client", "room_id", "channel_id", "model", "silent", "save_output"):
-        if k in patch:
-            v = patch[k]
-            if k == "name":
-                v = (v or "").strip() or None
-                if v and not _NAME_RE.match(v):
-                    return False, "invalid name"
-                if v and any(w.get("name") == v and w.get("id") != wid for w in items):
-                    return False, f"name '{v}' already exists"
-            target[k] = v
-    _save(items)
+    with _file_lock:
+        items = _load()
+        target = next((w for w in items if w.get("id") == wid), None)
+        if not target:
+            return False, "not found"
+        for k in ("name", "prompt", "client", "room_id", "channel_id", "model", "silent", "save_output"):
+            if k in patch:
+                v = patch[k]
+                if k == "name":
+                    v = (v or "").strip() or None
+                    if v and not _NAME_RE.match(v):
+                        return False, "invalid name"
+                    if v and any(w.get("name") == v and w.get("id") != wid for w in items):
+                        return False, f"name '{v}' already exists"
+                target[k] = v
+        _save(items)
     return True, "ok"
 
 
@@ -306,15 +312,16 @@ def read_output(item: dict[str, Any], name: str | None = None) -> tuple[Path, by
 
 
 def _set_last(item_id: str, *, last_fired: str | None = None, last_error: dict[str, Any] | None = "_KEEP_") -> None:
-    items = _load()
-    for it in items:
-        if it.get("id") == item_id:
-            if last_fired is not None:
-                it["last_fired"] = last_fired
-            if last_error != "_KEEP_":
-                it["last_error"] = last_error
-            break
-    _save(items)
+    with _file_lock:
+        items = _load()
+        for it in items:
+            if it.get("id") == item_id:
+                if last_fired is not None:
+                    it["last_fired"] = last_fired
+                if last_error != "_KEEP_":
+                    it["last_error"] = last_error
+                break
+        _save(items)
 
 
 def _build_prompt(item: dict[str, Any], extra_context: str, prompt_override: str) -> str | None:
@@ -450,9 +457,3 @@ def fire(
 
 def rate_check(wid: str) -> bool:
     return _rate_check(wid)
-
-
-def constant_time_token_eq(a: str, b: str) -> bool:
-    if not a or not b:
-        return False
-    return hmac.compare_digest(a, b)
