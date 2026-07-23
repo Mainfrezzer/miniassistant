@@ -827,9 +827,22 @@ _ANNOUNCE_PHRASES = (
     "ich werde ", "ich rufe ", "lass mich ", "lasst mich ", "ich muss ", "jetzt rufe ",
 )
 _ANNOUNCE_NUDGE_MSG = (
-    "STOP. You announced that you would call tools but did NOT emit any tool call. "
+    "You announced that you would call tools but did NOT emit any tool call. "
     "Call your tools RIGHT NOW — do not describe, just emit the tool call immediately."
 )
+
+# Runtime-injected guard/nudge messages ride on role:"user" for provider compatibility
+# (many local models choke on a system turn placed after the last user turn). Without a
+# marker the model reads an injected "STOP"/"SYSTEM:" as if the USER typed it and gets
+# confused. _sys_nudge() tags every such message so its origin is unambiguous: it is an
+# automatic guard from the runtime, not user input.
+_SYSTEM_NUDGE_MARK = (
+    "[AUTOMATIC SYSTEM MESSAGE — from the runtime guard, NOT from the user. "
+    "The user did not type this; it was injected because the previous turn needs correcting.]\n"
+)
+
+def _sys_nudge(text: str) -> dict[str, Any]:
+    return {"role": "user", "content": _SYSTEM_NUDGE_MARK + text}
 
 _RESEARCH_TOOLS = frozenset({"web_search", "read_url", "check_url", "exec"})
 _SYNC_TOOLS = frozenset({"invoke_model", "web_search", "read_url", "check_url", "debate"})
@@ -5716,7 +5729,7 @@ def _run_subagent_with_tools(
     # Stuck-Prevention: wenn nach Tool-Runden kein Content, Nudge senden
     if not total_content.strip() and rounds_used > 0:
         _log.info("Subagent %s: empty content after %d tool rounds — sending nudge", resolved_name, rounds_used)
-        msgs.append({"role": "user", "content": "You have not provided a text response yet. Please summarize your findings and give your final answer now."})
+        msgs.append(_sys_nudge("You have not provided a text response yet. Please summarize your findings and give your final answer now."))
         msgs = _compact_subagent_msgs(config, msgs, resolved_name, system, tools, num_ctx)
         try:
             nudge_r = ollama_chat(
@@ -6347,14 +6360,14 @@ def chat_round(
                         total_content = (total_content.rstrip() + "\n\n" + _abort_msg) if total_content.strip() else _abort_msg
                         msgs.append({"role": "assistant", "content": total_content.strip()})
                         break
-                    msgs.append({"role": "user", "content": (
-                        f"SYSTEM: You were stuck in a loop ({_loop_reason_cr}). Your previous "
+                    msgs.append(_sys_nudge(
+                        f"You were stuck in a loop ({_loop_reason_cr}). Your previous "
                         "output was aborted and discarded. Try again NOW — if you need a tool, "
                         "emit the tool call IMMEDIATELY (no long thinking, no repetition). "
                         "If no tool is needed, answer directly and briefly with the final result. "
                         "Keep thinking minimal. Use what you already know — do not re-search "
                         "the same query you already ran."
-                    )})
+                    ))
                     rounds += 1
                     continue
                 total_thinking += (msg.get("thinking") or "")
@@ -6382,7 +6395,7 @@ def chat_round(
                             _log.info("Research gate (chat_round): unsourced tokens %s — self-verify nudge (attempt %d/%d, round %d)",
                                       _gate_tokens, _research_gate_attempts, _research_gate_max, rounds)
                             msgs.append({"role": "assistant", "content": _msg_content or "", "thinking": msg.get("thinking") or ""})
-                            msgs.append({"role": "user", "content": _research_gate_nudge(user_content, _gate_tokens)})
+                            msgs.append(_sys_nudge(_research_gate_nudge(user_content, _gate_tokens)))
                             rounds += 1
                             continue
                     # Halluziniertes Bild erkannt (base64 oder fake URL)? → strippen, Korrektur-Runde starten
@@ -6390,12 +6403,12 @@ def chat_round(
                         _log.info("Halluziniertes Bild erkannt — sende Korrektur-Nudge (Runde %d)", rounds)
                         _stripped = _strip_hallucinated_images(_msg_content)
                         msgs.append({"role": "assistant", "content": _stripped or "(halluziniertes Bild entfernt)", "thinking": msg.get("thinking") or ""})
-                        msgs.append({"role": "user", "content":
-                            "STOP. Du hast ein Bild-Markdown in deiner Antwort ausgegeben (![...](...)). Das funktioniert NICHT — "
+                        msgs.append(_sys_nudge(
+                            "Du hast ein Bild-Markdown in deiner Antwort ausgegeben (![...](...)). Das funktioniert NICHT — "
                             "du kannst keine Bilder erzeugen indem du Markdown schreibst. Die URL die du geschrieben hast existiert NICHT. "
                             "Nutze JETZT deine Tools: invoke_model(model='...', message='...') um das Bild zu generieren/bearbeiten, "
                             "dann send_image(image_path='...') um es zu senden. Rufe die Tools JETZT auf."
-                        })
+                        ))
                         rounds += 1
                         continue
                     # Announce-without-doing nudge (parity with stream): thinking announced
@@ -6411,7 +6424,7 @@ def chat_round(
                             and rounds < max_tool_rounds - 1):
                         _log.info("Announce-without-doing nudge (chat_round, rounds=%d): thinking announced tool call but none emitted", rounds)
                         _announce_nudge_fired = True
-                        msgs.append({"role": "user", "content": _ANNOUNCE_NUDGE_MSG})
+                        msgs.append(_sys_nudge(_ANNOUNCE_NUDGE_MSG))
                         rounds += 1
                         continue
                     total_content += _display_content  # Nur finale Runde akkumulieren
@@ -6565,15 +6578,15 @@ def chat_round(
             # Max-Rounds-Exhaustion: Agent wollte noch weiterarbeiten aber hat keine Runden mehr
             if rounds >= max_tool_rounds and not _sent_image:
                 _log.info("Max tool rounds (%d) exhausted — sending wrap-up nudge", max_tool_rounds)
-                msgs.append({"role": "user", "content": (
-                    "SYSTEM: No more tool calls are possible. "
+                msgs.append(_sys_nudge(
+                    "No more tool calls are possible. "
                     "Nothing is running. No subworker is active. No background task exists. "
                     "Give your FINAL answer NOW based ONLY on results you already received. "
                     "Summarize honestly: what was completed, what is still pending. "
                     "Do NOT mention tool limits, rounds, or internal constraints to the user. "
                     "FORBIDDEN phrases: 'still running', 'waiting for results', 'in progress', 'wartet auf', 'läuft noch', 'wird gerade'. "
                     "If the task is incomplete, say: 'Aufgabe nicht vollständig abgeschlossen. Bitte sag mir dass ich weitermachen soll.'"
-                )})
+                ))
                 try:
                     wrapup_resp = _dispatch_chat(
                         config, try_model, msgs,
@@ -6598,7 +6611,7 @@ def chat_round(
             # Aber NICHT wenn send_image erfolgreich war (Bild IST die Antwort)
             elif not total_content.strip() and not _sent_image:
                 _log.info("Empty response after %d rounds — sending nudge", rounds)
-                msgs.append({"role": "user", "content": _nudge_message(msgs)})
+                msgs.append(_sys_nudge(_nudge_message(msgs)))
                 try:
                     nudge_resp = _dispatch_chat(
                         config, try_model, msgs,
@@ -6726,11 +6739,11 @@ def chat_round(
             _log.warning("chat_round: Doom-Loop in finaler Antwort (%s) — Korrektur-Runde", _ld_reason)
             _fixed = ""
             try:
-                _fix_msgs = (msgs_final or msgs) + [{"role": "user", "content": (
-                    "STOP. Deine letzte Antwort hing in einer Wiederholungs-Schleife (immer wieder "
+                _fix_msgs = (msgs_final or msgs) + [_sys_nudge(
+                    "Deine letzte Antwort hing in einer Wiederholungs-Schleife (immer wieder "
                     "derselbe Satz/Block). Antworte JETZT knapp und vollständig OHNE jede Wiederholung. "
                     "Gib nur die Antwort aus."
-                )}]
+                )]
                 _fix = _dispatch_chat(config, effective_model, _fix_msgs,
                                       system=system_prompt, think=False,
                                       timeout=float(config.get("api_timeout") or 900))
@@ -6777,13 +6790,13 @@ def chat_round(
             and len(_final_content.strip()) > 40):
         try:
             _log.info("Research-Reflection (chat_round): running self-check (web_search_count=%d)", _web_search_count)
-            _reflect_msgs = (msgs_final or []) + [{"role": "user", "content": (
+            _reflect_msgs = (msgs_final or []) + [_sys_nudge(
                 "SELF-CHECK (intern, nicht an den User): Prüfe deine letzte Antwort gegen die "
                 "Tool-Ergebnisse (web_search/read_url) in diesem Verlauf. Entferne oder korrigiere "
                 "JEDEN Fakten-Claim (Preis, Spec, Zahl, Datum, Version), der nicht durch ein "
                 "Tool-Ergebnis gedeckt ist. Behalte verifizierte Fakten + Links unverändert. "
                 "Gib NUR die korrigierte finale Antwort aus — keine Meta-Kommentare."
-            )}]
+            )]
             _refl = _dispatch_chat(config, effective_model, _reflect_msgs,
                                    system=system_prompt, think=False,
                                    timeout=float(config.get("api_timeout") or 900))
@@ -7312,14 +7325,14 @@ def chat_round_stream(
                 return
             # Verwirf korrupte Round-Daten — KEIN total_thinking += round_thinking
             yield {"type": "status", "message": f"🔄 Recovery-Versuch {_loop_recovery_attempts}/{_loop_recovery_max} — sende Korrektur-Nudge"}
-            msgs.append({"role": "user", "content": (
-                f"SYSTEM: You were stuck in a loop ({_loop_reason}). Your previous "
+            msgs.append(_sys_nudge(
+                f"You were stuck in a loop ({_loop_reason}). Your previous "
                 "output was aborted and discarded. Try again NOW — if you need a tool, "
                 "emit the tool call IMMEDIATELY (no long thinking, no repetition). "
                 "If no tool is needed, answer directly and briefly with the final result. "
                 "Keep thinking minimal. Use what you already know — do not re-search "
                 "the same query you already ran."
-            )})
+            ))
             rounds += 1
             continue
 
@@ -7369,7 +7382,7 @@ def chat_round_stream(
             _announce_nudge_fired = True
             if round_content:
                 total_content = total_content[:-len(round_content)]  # revert premature accumulation
-            msgs.append({"role": "user", "content": _ANNOUNCE_NUDGE_MSG})
+            msgs.append(_sys_nudge(_ANNOUNCE_NUDGE_MSG))
             rounds += 1
             continue
 
@@ -7395,7 +7408,7 @@ def chat_round_stream(
                     if _rc in total_content:
                         total_content = total_content.replace(_rc, "")
                     msgs.append({"role": "assistant", "content": _rc, "thinking": _rt})
-                    msgs.append({"role": "user", "content": _research_gate_nudge(user_content, _gate_tokens)})
+                    msgs.append(_sys_nudge(_research_gate_nudge(user_content, _gate_tokens)))
                     rounds += 1
                     continue
 
@@ -7406,12 +7419,12 @@ def chat_round_stream(
                     total_content = total_content.replace(_rc, "")
                 _stripped = _strip_hallucinated_images(_rc)
                 msgs.append({"role": "assistant", "content": _stripped or "(halluziniertes Bild entfernt)", "thinking": _rt})
-                msgs.append({"role": "user", "content":
-                    "STOP. Du hast ein Bild-Markdown in deiner Antwort ausgegeben (![...](...)). Das funktioniert NICHT — "
+                msgs.append(_sys_nudge(
+                    "Du hast ein Bild-Markdown in deiner Antwort ausgegeben (![...](...)). Das funktioniert NICHT — "
                     "du kannst keine Bilder erzeugen indem du Markdown schreibst. Die URL die du geschrieben hast existiert NICHT. "
                     "Nutze JETZT deine Tools: invoke_model(model='...', message='...') um das Bild zu generieren/bearbeiten, "
                     "dann send_image(image_path='...') um es zu senden. Rufe die Tools JETZT auf."
-                })
+                ))
                 rounds += 1
                 continue
 
@@ -7422,7 +7435,7 @@ def chat_round_stream(
             # Aber NICHT wenn send_image erfolgreich war (Bild IST die Antwort)
             if not total_content.strip() and not _sent_image:
                 _log.info("Empty stream response after %d rounds — sending nudge", rounds)
-                msgs.append({"role": "user", "content": _nudge_message(msgs)})
+                msgs.append(_sys_nudge(_nudge_message(msgs)))
                 try:
                     nudge_resp = _dispatch_chat(
                         config, try_model, msgs,
@@ -7476,10 +7489,10 @@ def chat_round_stream(
             if not total_content.strip() and not _sent_image:
                 _log.warning("Hail-mary: empty after nudge, forcing think=False with explicit prompt")
                 try:
-                    msgs.append({"role": "user", "content": (
+                    msgs.append(_sys_nudge(
                         "Antworte JETZT mit deiner finalen Antwort als reinen Markdown-Text. "
                         "Kein Denken, keine <think>-Tags, kein Tool-Call. Nur die Antwort."
-                    )})
+                    ))
                     hm_resp = _dispatch_chat(
                         config, try_model, msgs,
                         system=system_effective, think=False,
@@ -7761,25 +7774,25 @@ def chat_round_stream(
                         _sent_image = True
             # Bei Timeout: Modell explizit nudgen, mit dem zu arbeiten was da ist und KEIN neuer Subagent
             if _timed_out:
-                msgs.append({"role": "user", "content": (
-                    "SYSTEM: Vorheriger Tool-Aufruf hat Timeout erreicht. Starte KEINE neue Recherche, "
+                msgs.append(_sys_nudge(
+                    "Vorheriger Tool-Aufruf hat Timeout erreicht. Starte KEINE neue Recherche, "
                     "KEINEN neuen invoke_model. Nutze die bereits in der History stehenden Tool-Ergebnisse "
                     "aus früheren Runden und liefere dem User eine ehrliche Zwischenzusammenfassung: "
                     "was wurde gefunden, was fehlt noch, was kann der User tun (z.B. 'mach weiter' / 'fokussiere auf X')."
-                )})
+                ))
         rounds += 1
 
     # Max-Rounds-Exhaustion: Agent wollte noch weiterarbeiten aber hat keine Runden mehr
     if rounds >= max_tool_rounds and not _sent_image:
         _log.info("Stream: Max tool rounds (%d) exhausted — sending wrap-up nudge", max_tool_rounds)
-        msgs.append({"role": "user", "content": (
-            "SYSTEM: You have used ALL your tool rounds — no more tool calls are possible. "
+        msgs.append(_sys_nudge(
+            "You have used ALL your tool rounds — no more tool calls are possible. "
             "Nothing is running. No subworker is active. No background task exists. "
             "Give your FINAL answer NOW based ONLY on results you already received. "
             "Summarize honestly: what was completed, what is still pending. "
             "FORBIDDEN phrases: 'still running', 'waiting for results', 'in progress', 'wartet auf', 'läuft noch', 'wird gerade'. "
             "If the task is incomplete, say: 'Aufgabe nicht vollständig abgeschlossen. Bitte sag mir dass ich weitermachen soll.'"
-        )})
+        ))
         try:
             wrapup_resp = _dispatch_chat(
                 config, effective_model, msgs,
@@ -7802,7 +7815,7 @@ def chat_round_stream(
     # Aber NICHT wenn send_image erfolgreich war (Bild IST die Antwort)
     elif not total_content.strip() and not _sent_image:
         _log.info("Empty stream response after max rounds — sending nudge")
-        msgs.append({"role": "user", "content": _nudge_message(msgs)})
+        msgs.append(_sys_nudge(_nudge_message(msgs)))
         try:
             nudge_resp = _dispatch_chat(
                 config, effective_model, msgs,
@@ -7898,13 +7911,13 @@ def chat_round_stream(
             _log.info("Research-Reflection: running self-check (web_search_count=%d, content_len=%d)",
                       _web_search_count, len(_final_content))
             yield {"type": "status", "message": "🔍 Self-Check: prüfe Antwort gegen Quellen"}
-            _reflect_msgs = msgs + [{"role": "user", "content": (
+            _reflect_msgs = msgs + [_sys_nudge(
                 "SELF-CHECK (intern, nicht an den User): Prüfe deine letzte Antwort gegen die "
                 "Tool-Ergebnisse (web_search/read_url) in diesem Verlauf. Entferne oder korrigiere "
                 "JEDEN Fakten-Claim (Preis, Spec, Zahl, Datum, Version), der nicht durch ein "
                 "Tool-Ergebnis gedeckt ist. Behalte verifizierte Fakten + Links unverändert. "
                 "Gib NUR die korrigierte finale Antwort aus — keine Meta-Kommentare, keine Erklärung."
-            )}]
+            )]
             _refl = _dispatch_chat(config, try_model, _reflect_msgs,
                                    system=system_effective, think=False,
                                    options=options or None, timeout=_stream_timeout)
