@@ -42,6 +42,7 @@ DOC_FILES = [
     "DIRECTIONS.md",
     "DOCUMENTS.md",
     "GROUP_ROOMS.md",
+    "WEBHOOKS.md",
 ]
 
 

@@ -434,12 +434,17 @@ def fire(
             except Exception as e:
                 logger.warning("save output failed: %s", e)
 
+        pushed = False
         if not silent and not is_silent_token and response.strip() and has_target:
             try:
                 from miniassistant.notify import send_notification
                 send_notification(response, client=client, room_id=room_id, channel_id=channel_id)
+                pushed = True
             except Exception as e:
                 logger.warning("notify failed: %s", e)
+
+        if silent and not out_path and not is_silent_token and response.strip():
+            logger.warning("webhook %s: silent + save_output=false — output is discarded", name)
 
         _set_last(wid, last_fired=fired_at, last_error=None)
         return {
@@ -447,7 +452,8 @@ def fire(
             "id": wid,
             "fired_at": fired_at,
             "silent": silent,
-            "response": "" if (silent and save_output) else response,
+            "response": "" if silent else response,
+            "pushed": pushed,
             "output_path": out_path,
         }
     finally:

@@ -15,7 +15,13 @@ avatar: "https://example.org/bot.png"  # URL (will be downloaded)
 
 If `avatar` is not set in config, check `agent_dir/avatar.png`. If that doesn't exist, the default logo is used.
 
-**Format:** PNG recommended (works everywhere: Matrix, Discord, Web-UI). Telegram bot avatars canNOT be set via API — only manually via @BotFather (`/setuserpic`); tell the user that. Square aspect ratio (e.g. 256x256 or 512x512). Max ~2 MB.
+**Format:** PNG recommended (works everywhere: Matrix, Discord, Web-UI). Square aspect ratio (e.g. 256x256 or 512x512). Max ~2 MB.
+
+## Telegram — NOT possible via API
+
+**Telegram bot avatars canNOT be set programmatically.** The Bot API has no method for it (`setProfilePhoto` does not exist — returns 404). Do NOT try curl, do NOT read the bot_token for this, do NOT retry with other method names.
+
+The ONLY way: the user does it manually via **@BotFather** → `/setuserpic` → select the bot → send the image. If the user asks for a Telegram avatar, explain exactly that and offer to send them the current `agent_dir/avatar.png` so they can forward it to BotFather.
 
 ## URL validation
 
@@ -110,7 +116,7 @@ curl -s -X PATCH "https://discord.com/api/v10/users/@me" \
 
 ## Behavior — when user asks to set/change avatar
 
-**Act immediately. Do NOT tell the user to do it — do it yourself.**
+**First check the platform.** On **Telegram**: do NOT act — API cannot do it, see the Telegram section above; tell the user to use @BotFather. On Matrix/Discord: act immediately, do NOT tell the user to do it — do it yourself.
 
 1. **Check if avatar image exists:** `exec: ls -la agent_dir/avatar.png`
    - If missing and user provided a file path → copy it: `exec: cp PATH agent_dir/avatar.png`

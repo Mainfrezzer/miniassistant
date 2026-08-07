@@ -24,11 +24,11 @@ Each fire optionally sends:
 - `extra_context` — prepended to the default prompt (typical: data payload from caller)
 - `prompt` — full override (rare)
 - routing overrides (`client`, `room_id`, `channel_id`)
-- `silent`, `save_output`, `output_name`, `model`
+- `silent`, `save_output`, `output_name`, `model`, `wait`
 
 ## Create
 
-`webhook(action='create', name='daily-report', prompt='Format the data and post it to chat')`
+`webhook(action='create', name='daily-report', prompt='Format the data as a bullet list')`
 
 - `name`: optional slug `^[a-z0-9][a-z0-9_-]{0,63}$` — used for output dir + human handle
 - `prompt`: required — the default task. Plain language, no exec/HOW.
@@ -36,6 +36,12 @@ Each fire optionally sends:
 - `model`: optional alias/name for the bot model
 - `silent`: bool — if true, output not pushed to chat, saved to file only
 - `save_output`: bool (default true) — write file even when not silent
+
+**Prompt wording:** the prompt describes only *what to produce*. Delivery is the backend's job —
+the response text is auto-sent to `client`/`room_id`/`channel_id`. Never write "send it to room X",
+"post to chat", "reply via matrix" into the prompt: the model then tries to deliver a second time
+(manual API calls, send_image) or pads the answer with delivery chatter. Same for the `[NO_MESSAGE]`
+case — the sentinel suppresses the push, the prompt doesn't have to say how.
 
 After create, the response includes the **token** in plaintext. Show it once to the user; it's also visible later in the WebUI list (storage is plaintext).
 
@@ -54,6 +60,20 @@ Content-Type: application/json
 }
 ```
 
+### Sync vs. async (`wait`)
+
+Default depends on whether the webhook has a destination:
+
+| Webhook target | Default | Response |
+|----------------|---------|----------|
+| room/channel set | async | `202 {"ok":true,"status":"started","id":"…"}` immediately; answer goes to the room |
+| no target | sync | `200` after the run, answer in `response` |
+
+`wait` in the body overrides: `true` = block until done, `false` = ack immediately.
+Async is the default for targeted webhooks because external senders (GitHub, CI, IoT)
+time out long before an agent run finishes and then retry — which fires the task twice.
+Async failures don't reach the caller; they land in the service log and in `last_error`.
+
 Final prompt assembly: `extra_context + "\n\n" + (body.prompt or webhook.prompt)`
 
 Token may also be passed via header `X-Webhook-Token: <token>` to keep it out of URL logs.
@@ -63,7 +83,7 @@ Token may also be passed via header `X-Webhook-Token: <token>` to keep it out of
 External services don't know our body schema. They POST their own JSON / form-encoded / text body.
 The receiver auto-extracts:
 
-- **Control fields** in JSON body (`prompt`, `extra_context`, `client`, `room_id`, `channel_id`, `silent`, `save_output`, `output_name`, `model`) → honored normally.
+- **Control fields** in JSON body (`prompt`, `extra_context`, `client`, `room_id`, `channel_id`, `silent`, `save_output`, `output_name`, `model`, `wait`) → honored normally.
 - **Everything else** → wrapped into a `[INCOMING WEBHOOK PAYLOAD]` block and used as `extra_context`. Includes forwarded `X-*` headers and `User-Agent` so the prompt can read event type, signatures, source.
 - **Payload cap:** 20 000 chars (truncate marker appended if longer).
 
@@ -91,11 +111,16 @@ For external-service webhooks the **default prompt is effectively required** (Gi
 }
 ```
 
-For silent webhooks `response` may be empty (use the GET endpoints to retrieve output).
+`silent` webhooks always return `response: ""` — no chat push, no HTTP echo. Retrieve the
+output via the GET endpoints. `silent` + `save_output: false` discards the output entirely
+and logs a warning.
+
+`pushed` (bool) says whether the answer actually reached the chat target.
 
 ### Status codes
 
-- `200` — fired successfully
+- `200` — fired successfully (sync)
+- `202` — accepted, running in background (async; see `wait`)
 - `400` — no prompt available (neither body nor webhook default has one)
 - `404` — token unknown OR webhooks disabled (same response — never leak existence)
 - `429` — per-token rate limit exceeded

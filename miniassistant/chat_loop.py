@@ -3785,14 +3785,23 @@ def _run_tool(
             )
         sub_model = arguments.get("model", "").strip()
         sub_msg = arguments.get("message", "").strip()
-        # Auto-select image gen model when model is missing but image_path is set.
-        # Default: erstes Modell in image_generation Liste (User-Reihenfolge respektiert).
-        if not sub_model and arguments.get("image_path"):
+        # Default the image model to the first configured image_generation entry
+        # ONLY when no model was given. An explicitly named model is always
+        # respected. Fires for edits (image_path set) and for fresh generation in
+        # an image context (group mode / image params) where the orchestrator
+        # omitted the model.
+        _has_img_path_early = bool((arguments.get("image_path") or "").strip())
+        _gm_early = bool((config.get("_chat_context") or {}).get("group_mode"))
+        if not sub_model:
             from miniassistant.ollama_client import get_image_generation_models as _auto_img_models
-            _auto_models = _auto_img_models(config)
-            if _auto_models:
-                sub_model = _auto_models[0]
-                _log.info("invoke_model: auto-selected '%s' (no model given, image_path set)", sub_model)
+            _img_models_early = _auto_img_models(config) or []
+            _img_default = _img_models_early[0] if _img_models_early else ""
+            _img_param_keys = ("size", "steps", "seed", "cfg_scale", "guidance",
+                               "strength", "negative_prompt", "sampler", "scheduler")
+            _has_img_param = any(arguments.get(_k) not in (None, "") for _k in _img_param_keys)
+            if _img_default and (_has_img_path_early or _gm_early or _has_img_param):
+                sub_model = _img_default
+                _log.info("invoke_model: defaulted to '%s' (no model given, image context)", sub_model)
         if not sub_model or not sub_msg:
             return "invoke_model requires 'model' and 'message'"
         # Whitelist bauen:

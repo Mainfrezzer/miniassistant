@@ -14,6 +14,7 @@ import os
 import shutil
 import threading
 import time
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -6182,7 +6183,7 @@ def _wh_extract_token(request: Request, path_token: str) -> str:
 # Body keys we treat as control fields. Anything else in a JSON body counts as payload.
 _WH_CONTROL_KEYS = {
     "prompt", "extra_context", "client", "room_id", "channel_id",
-    "silent", "save_output", "output_name", "model",
+    "silent", "save_output", "output_name", "model", "wait",
 }
 
 # Headers we forward to the prompt — useful metadata from senders (GitHub, Slack, etc.).
@@ -6234,22 +6235,24 @@ async def _build_incoming_context(request: Request) -> tuple[dict, str]:
             except Exception:
                 payload_block = repr(body)
     elif ctype == "application/x-www-form-urlencoded":
+        # Parsed by hand: Starlette's request.form() asserts python-multipart even for
+        # urlencoded bodies, and we don't want that dependency for a trivial format.
         try:
-            form = await request.form()
-            form_dict = {k: form[k] for k in form.keys()}
+            raw = await request.body()
+            form_dict = dict(urllib.parse.parse_qsl(raw.decode("utf-8", errors="replace"), keep_blank_values=True))
             controls = {k: form_dict[k] for k in _WH_CONTROL_KEYS if k in form_dict}
             rest = {k: v for k, v in form_dict.items() if k not in _WH_CONTROL_KEYS}
             if rest:
                 payload_block = json.dumps(rest, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("webhook: form-encoded body could not be parsed: %s", e)
     else:
         try:
             raw = await request.body()
             if raw:
                 payload_block = raw.decode("utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("webhook: raw body could not be read: %s", e)
 
     if len(payload_block) > _WH_MAX_PAYLOAD_CHARS:
         payload_block = payload_block[:_WH_MAX_PAYLOAD_CHARS] + f"\n…[truncated, original {len(payload_block)} chars]"
@@ -6289,10 +6292,15 @@ async def webhook_fire(request: Request, token: str):
     """Fire a webhook by token.
     Body handling:
       - JSON with our control keys (prompt, extra_context, client, room_id, channel_id, silent,
-        save_output, output_name, model) → keys are honored, any remaining JSON fields become payload.
+        save_output, output_name, model, wait) → keys are honored, any remaining JSON fields become payload.
       - JSON from foreign senders (GitHub, Discord, ...) → whole body becomes payload.
       - form-encoded / text / raw bytes → body becomes payload.
       X-* headers and User-Agent are forwarded so prompts can read event type, signature, source.
+    Response mode:
+      - Webhook has a target (client/room_id/channel_id) → 202 immediately, run in background.
+        External senders time out long before an agent run finishes; the answer goes to the room.
+      - No target → run synchronously, answer in the HTTP body (nowhere else to put it).
+      - body.wait forces either mode explicitly.
     """
     from miniassistant import webhooks as _wh
     if not _wh.is_enabled():
@@ -6304,9 +6312,7 @@ async def webhook_fire(request: Request, token: str):
     if not _wh.rate_check(item["id"]):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     body, extra_context = await _build_incoming_context(request)
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(_chat_executor, lambda: _wh.fire(
-        item,
+    fire_kwargs = dict(
         extra_context=extra_context,
         prompt_override=str(body.get("prompt") or ""),
         client_override=body.get("client"),
@@ -6316,7 +6322,31 @@ async def webhook_fire(request: Request, token: str):
         save_output_override=body.get("save_output") if "save_output" in body else None,
         output_name=body.get("output_name"),
         model_override=body.get("model"),
-    ))
+    )
+    has_target = bool(
+        (body.get("client") or item.get("client"))
+        or (body.get("room_id") or item.get("room_id"))
+        or (body.get("channel_id") or item.get("channel_id"))
+    )
+    if "wait" in body:
+        _w = body["wait"]
+        wait = _w.strip().lower() not in ("", "0", "false", "no") if isinstance(_w, str) else bool(_w)
+    else:
+        wait = not has_target
+
+    loop = asyncio.get_event_loop()
+    if not wait:
+        def _bg() -> None:
+            try:
+                res = _wh.fire(item, **fire_kwargs)
+                if not res.get("ok"):
+                    _log.warning("webhook %s failed: %s", (item.get("name") or item.get("id", "")[:8]), res.get("error"))
+            except Exception as e:
+                _log.warning("webhook %s crashed: %s", (item.get("name") or item.get("id", "")[:8]), e)
+        loop.run_in_executor(_chat_executor, _bg)
+        return JSONResponse({"ok": True, "status": "started", "id": item.get("id", "")}, status_code=202)
+
+    result = await loop.run_in_executor(_chat_executor, lambda: _wh.fire(item, **fire_kwargs))
     if not result.get("ok"):
         return JSONResponse(result, status_code=400 if "no prompt" in (result.get("error") or "") else 500)
     return JSONResponse(result)
@@ -6521,6 +6551,7 @@ async def webhooks_page(request: Request):
                 f' data-room="{_html.escape(w.get("room_id") or "", quote=True)}"'
                 f' data-channel="{_html.escape(w.get("channel_id") or "", quote=True)}"'
                 f' data-silent="{"1" if w.get("silent") else "0"}"'
+                f' data-saveoutput="{"1" if w.get("save_output", True) else "0"}"'
                 f' title="Bearbeiten">&#9998;</button>'
             )
             _has_default = "1" if (w.get("prompt") or "").strip() else "0"
@@ -6757,10 +6788,11 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
             <tbody>
               <tr><td><code>prompt</code></td><td>nur wenn kein Default</td><td>Was das Modell tun soll (Plain Language). Überschreibt Default falls beides gesetzt.</td></tr>
               <tr><td><code>extra_context</code></td><td>optional</td><td>Zusätzliche Daten (Payload, Logs, Status) — wird vor den Prompt gestellt.</td></tr>
-              <tr><td><code>silent</code></td><td>optional</td><td><code>true</code> = nicht in Chat pushen, nur als Datei speichern. Default: wie Webhook-Setting.</td></tr>
+              <tr><td><code>silent</code></td><td>optional</td><td><code>true</code> = nicht in Chat pushen, nur als Datei speichern — HTTP-Body bleibt dann auch leer. Default: wie Webhook-Setting.</td></tr>
               <tr><td><code>save_output</code></td><td>optional</td><td><code>false</code> = Output nicht persistieren. Default: <code>true</code>.</td></tr>
               <tr><td><code>output_name</code></td><td>optional</td><td>Dateiname für gespeicherten Output. Default: Timestamp.</td></tr>
               <tr><td><code>model</code></td><td>optional</td><td>Modell-Alias/Name nur für diesen Lauf. Default: das im Webhook gespeicherte.</td></tr>
+              <tr><td><code>wait</code></td><td>optional</td><td><code>true</code> = HTTP blockt bis fertig, Antwort im Body. <code>false</code> = sofort <code>202 started</code>, Lauf im Hintergrund. Default: <code>false</code> wenn ein Ziel (Raum/Channel) gesetzt ist, sonst <code>true</code>.</td></tr>
             </tbody>
           </table>
 
@@ -6900,6 +6932,8 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
           <input type="text" id="editModel">
           <label for="editSilent">Silent</label>
           <div><label class="cb"><input type="checkbox" id="editSilent"> kein Chat-Push, Output nur in Datei</label></div>
+          <label for="editSaveOutput">Output</label>
+          <div><label class="cb"><input type="checkbox" id="editSaveOutput"> Output zusätzlich speichern</label></div>
         </div>
         <div class="modal-actions">
           <button class="btn btn-outline" id="editCancel">Abbrechen</button>
@@ -7053,6 +7087,7 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
         else tgtSel.value = "";
         document.getElementById("editModel").value = this.getAttribute("data-model") || "";
         document.getElementById("editSilent").checked = this.getAttribute("data-silent") === "1";
+        document.getElementById("editSaveOutput").checked = this.getAttribute("data-saveoutput") === "1";
         document.getElementById("editModal").classList.add("open");
       }});
     }});
@@ -7063,6 +7098,7 @@ curl -X POST {_host_base}/webhook/&lt;TOKEN&gt; \\
         prompt: document.getElementById("editPrompt").value.trim(),
         model: document.getElementById("editModel").value.trim() || null,
         silent: document.getElementById("editSilent").checked,
+        save_output: document.getElementById("editSaveOutput").checked,
       }};
       var tgt = document.getElementById("editTarget").value || "";
       if (tgt.indexOf("matrix:") === 0) {{

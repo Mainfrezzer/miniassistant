@@ -27,6 +27,7 @@ chat_clients:
 
 ## How it differs from Matrix/Discord (important for tools)
 
+- **No avatar API.** The bot's profile picture canNOT be set via Bot API (no such method — 404). Only the user can set it, manually via @BotFather → `/setuserpic`. Never attempt it with curl or the bot_token; see AVATARS.md.
 - **No history API.** Telegram bots cannot fetch old messages. MiniAssistant keeps its own message cache (`telegram_history.json` in the config dir, last ~300 messages per chat, restart-safe). `read_recent_messages` and `search_chat_history` read from this cache — they only see messages received **while the bot was running and privacy mode was disabled**.
 - **No chat enumeration.** A chat appears in the WebUI `/rooms` page only after the bot has seen at least one message there.
 - **Chat IDs are numeric**, groups are negative (e.g. `-1001234567890`). User ID == chat ID for private chats.
