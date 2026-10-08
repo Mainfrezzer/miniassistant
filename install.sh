@@ -186,11 +186,12 @@ if ! "$VENV_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
   "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || true
 fi
 
-# Abhängigkeiten (aus pyproject.toml inkl. optionale Extras: matrix, discord, scheduler, mempalace, docs, browser)
+# Abhängigkeiten (aus pyproject.toml inkl. optionale Extras: matrix, discord, scheduler, mempalace, docs, browser, mcp)
 # browser = curl_cffi (Chrome/Safari TLS-Impersonation) — nötig für read_url Anti-Bot-Fallback (Cloudflare/CDN 403)
+# mcp = MCP-Client für externe Tools (stdio + Streamable HTTP Transport)
 echo "Installiere Abhängigkeiten..."
 "$VENV_DIR/bin/python3" -m pip install -q --upgrade pip
-"$VENV_DIR/bin/python3" -m pip install -q -e '.[matrix,discord,scheduler,mempalace,docs,browser]'
+"$VENV_DIR/bin/python3" -m pip install -q -e '.[matrix,discord,scheduler,mempalace,docs,browser,mcp]'
 
 # Kurz prüfen, ob matrix-nio im selben venv importierbar ist (für Matrix-Bot)
 if ! "$VENV_DIR/bin/python3" -c "import nio" 2>/dev/null; then

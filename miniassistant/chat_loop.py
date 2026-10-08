@@ -2722,6 +2722,29 @@ def _run_tool(
             _sd_lines.append("")
         _sd_lines.append("Full files: read with `cat` from the paths above (relative to the agent dir).")
         return "\n".join(_sd_lines)
+    if name.startswith("mcp_"):
+        from miniassistant import mcp_client
+        parts = name[4:].split("_", 1)
+        if len(parts) != 2:
+            return f"MCP-Tool-Name ungültig: {name}"
+        server_name, tool_name = parts
+        if not mcp_client.is_available():
+            return "MCP-Unterstützung nicht installiert. Ausführen: pip install -e '.[mcp]'"
+        try:
+            r = mcp_client.call_tool_sync(config, server_name, tool_name, arguments or {})
+            content = r.content if hasattr(r, "content") else []
+            if isinstance(content, list):
+                texts = []
+                for c in content:
+                    if hasattr(c, "type") and c.type == "text" and hasattr(c, "text"):
+                        texts.append(c.text)
+                    elif isinstance(c, dict) and c.get("type") == "text":
+                        texts.append(c.get("text", ""))
+                return "\n".join(texts) or str(r)
+            return str(content) if content else str(r)
+        except Exception as e:
+            return f"MCP-Aufruf fehlgeschlagen: {e}"
+
     if name in ("code_task", "code_task_status", "code_task_followup", "code_task_list", "code_task_cancel"):
         from miniassistant import opencode_client as _oc
 

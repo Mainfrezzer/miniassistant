@@ -360,13 +360,39 @@ async def _slot_cache_cleanup_loop() -> None:
             _log.warning("Slot-Cache-Cleanup error: %s", e)
 
 
+@app.on_event("startup")
+async def _startup() -> None:
+    """Beim Start: MCP-Server verbinden (Tool-Discovery)."""
+    try:
+        from miniassistant import mcp_client
+        if mcp_client.is_available():
+            import asyncio
+            asyncio.create_task(_mcp_startup(load_config()))
+    except Exception:
+        pass
+
+
+async def _mcp_startup(config: dict) -> None:
+    """MCP-Server beim Start verbinden (nicht blockierend)."""
+    try:
+        from miniassistant import mcp_client
+        await mcp_client.start_all_servers(config)
+    except Exception:
+        pass
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    """Chat-Executor cleanup und Bot-Tasks abbrechen."""
+    """Chat-Executor cleanup, MCP-Server beenden, Bot-Tasks abbrechen."""
     global _chat_executor, _matrix_bot_task, _discord_bot_task, _telegram_bot_task, _session_cleanup_task, _slot_cache_cleanup_task
     if _chat_executor:
         _chat_executor.shutdown(wait=False)
     _chat_executor = None
+    try:
+        from miniassistant import mcp_client
+        mcp_client.shutdown_all(load_config())
+    except Exception:
+        pass
     if _slot_cache_cleanup_task:
         _slot_cache_cleanup_task.cancel()
     if _session_cleanup_task and not _session_cleanup_task.done():
@@ -1156,6 +1182,16 @@ async def config_form_page(request: Request):
         {{ n:"attach_url", t:"text", l:"Remote OpenCode-Server (leer = lokaler Subprocess; z. B. http://host:4096)" }},
     ]}},
     // Hinweis: opencode.presets (model/agent pro Preset) nur im Raw-YAML-Editor.
+
+    {{ id: "mcp_servers", title: "MCP-Server (externe Tools)", path: "mcp_servers", type:"dict_obj_inline",
+        keyLabel:"Server-Name", item:[
+            {{ n:"command", t:"text", l:"Kommando (lokal, z. B. pdfcraft-cli) oder leer für remote" }},
+            {{ n:"args", t:"list_inline", l:"Argumente (lokal, z. B. [mcp, --root, /path])" }},
+            {{ n:"url", t:"text", l:"Remote-URL (Streamable HTTP, z. B. https://mcp.example.com) oder leer für lokal" }},
+            {{ n:"enabled", t:"bool", l:"Aktiv" }},
+            {{ n:"expose_to_agent", t:"bool", l:"Dem Assistenten als Tools zeigen (mit Context)" }},
+            {{ n:"timeout", t:"int", l:"Timeout pro Aufruf (s)" }},
+        ] }},
 
     {{ id: "scheduler", title: "Scheduler", path: "scheduler", type:"falsy_or_form",
        fields:[{{n:"enabled", t:"bool", l:"Aktiv"}}] }},
@@ -2701,6 +2737,13 @@ async def api_config_reveal(request: Request):
     return JSONResponse({"value": "" if cur is None else str(cur)})
 
 
+# Top-Level Keys, die ersetzt statt gemergt werden (wie Listen).
+# Wenn der Nutzer in der UI etwas entfernt, muss es weg sein — kein "Beibehalten aus Original".
+_FORM_REPLACE_KEYS = frozenset({
+    "mcp_servers",  # dict_of_server_config: Entfernen/Einträge muss wirken
+})
+
+
 def _deep_merge_form(original: dict, new: dict) -> dict:
     """Deep-merge `new` into `original` für Form-Save.
     Regeln:
@@ -2712,7 +2755,9 @@ def _deep_merge_form(original: dict, new: dict) -> dict:
     """
     out = dict(original)
     for k, v in new.items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
+        if k in _FORM_REPLACE_KEYS:
+            out[k] = v
+        elif isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _deep_merge_form(out[k], v)
         else:
             out[k] = v

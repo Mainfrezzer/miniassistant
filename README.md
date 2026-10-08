@@ -225,6 +225,61 @@ response = client.chat.completions.create(
 
 Unterschiede: `/v1/` = mit Agent-Context (MiniAssistant), `/raw/v1/` = direkter Proxy (OpenAI-kompatibel). Details: **[CONFIGURATION.md](CONFIGURATION.md)** (#10b)
 
+## MCP-Server (externe Tools)
+
+MiniAssistant kann sich zu beliebigen **MCP-Servern** (Model Context Protocol) verbinden und deren Tools als eigene verwenden. Jeder Server wird in der Konfiguration definiert:
+
+```yaml
+mcp_servers:
+  pdfcraft:
+    command: "pdfcraft-cli"
+    args: ["mcp", "--root", "/home/user/dokumente"]
+    enabled: true
+    expose_to_agent: true
+  remote_service:
+    url: "https://mcp.example.com/api"
+    enabled: true
+    expose_to_agent: true
+```
+
+**Optionen pro Server:**
+
+| Option | Beschreibung | Default |
+|--------|-------------|---------|
+| `command` | Executable/Script (lokal) oder leer für remote | — |
+| `args` | Argumente als Liste (lokal) | `[]` |
+| `url` | Remote-URL (Streamable HTTP) oder leer für lokal | — |
+| `enabled` | Server aktivieren | `true` |
+| `expose_to_agent` | Assistent sieht Tools (Context) | `true` |
+| `timeout` | Timeout pro Aufruf (Sekunden) | `60` |
+
+**"Mit Context" vs. "Raw":**
+- `expose_to_agent: true` → Assistent sieht die Tools und kann sie eigenständig aufrufen
+- `expose_to_agent: false` → Tools sind nicht für den Assistenten sichtbar (nur intern/manuell)
+
+**Beispiel: PdfCraft als PDF-Backend**
+Nach Installation von [PdfCraft](https://github.com/storytold/pdfcraft) und dem CLI-Tool (`pdfcraft-cli`) kann MiniAssistant PDF-Dokumente öffnen, Text extrahieren, Seiten manipulieren und mehr:
+
+```bash
+# PdfCraft CLI installieren (Linux)
+tar xzf printcraft-cli-0.2.1-linux-x86_64.tar.gz
+sudo cp pdfcraft-cli /usr/local/bin/
+```
+
+Danach kann der Assistent sagen: *"Öffne invoice.pdf und extrahiere alle Rechnungen über 100€"* und nutzt die MCP-Tools automatisch.
+
+**Remote-MCP-Server:** Streamable HTTP wird unterstützt. `url` setzen statt `command`/`args`:
+```yaml
+mcp_servers:
+  remote:
+    url: "https://mcp.example.com/api"
+    enabled: true
+```
+
+**Installation:** MCP-Unterstützung ist optional: `pip install -e '.[mcp]'`
+
+Details: **[CONFIGURATION.md](CONFIGURATION.md)** (#15g)
+
 ## Binden auf alle Interfaces
 
 In der Config `server.host: "0.0.0.0"` setzen (miniassistant config oder YAML). **Wichtig**: Token setzen, damit nur Berechtigte zugreifen.

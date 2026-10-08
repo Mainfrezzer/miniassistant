@@ -57,6 +57,8 @@ _PASSTHROUGH_TUNING_KEYS = (
     # OpenCode coding-connector: {enabled, default_repo, jobs_dir, max_concurrent,
     #   max_runtime, presets: {name: {model, agent, max_runtime}}}
     "opencode",
+    # MCP-Server: {<name>: {command, args, enabled, expose_to_agent, timeout}}
+    "mcp_servers",
     # Bild-Cap pro Turn (chat_loop) + Chat-Storage-Verzeichnis (web/app.py)
     "images_max_per_turn", "chats_dir",
 )

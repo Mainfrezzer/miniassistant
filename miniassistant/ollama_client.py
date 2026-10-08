@@ -1027,6 +1027,21 @@ def _tools_schema(
                 },
             },
         })
+
+    # MCP-Tools (dynamisch aus config: mcp_servers.<name>)
+    from miniassistant import mcp_client
+    for tool in mcp_client.get_agent_tools(config):
+        tool_name = f"mcp_{tool['server']}_{tool['name']}"
+        params = tool.get("input_schema") or {"type": "object", "properties": {}}
+        schema.append({
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": f"[MCP:{tool['server']}] {tool['description']}",
+                "parameters": params,
+            },
+        })
+
     return schema
 
 

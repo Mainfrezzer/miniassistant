@@ -1529,6 +1529,66 @@ OpenCode hat ein eigenes **Agent-System** (`opencode agent create` / `opencode a
 
 ---
 
+## 15g. MCP-Server (externe Tools)
+
+MiniAssistant kann sich zu beliebigen **MCP-Servern** (Model Context Protocol) verbinden und deren Tools als eigene verwenden. Jeder Server wird in der Konfiguration definiert:
+
+```yaml
+mcp_servers:
+  pdfcraft:
+    command: "pdfcraft-cli"
+    args: ["mcp", "--root", "/home/user/dokumente"]
+    enabled: true
+    expose_to_agent: true
+    timeout: 60
+  remote_tool:
+    url: "https://mcp.example.com/api"
+    enabled: true
+    expose_to_agent: true
+    timeout: 30
+```
+
+**Konfigurationsoptionen pro Server:**
+
+| Option | Beschreibung | Default |
+|--------|-------------|---------|
+| `command` | Executable/Script (lokal) oder leer für remote | — |
+| `args` | Argumente als Liste (lokal) | `[]` |
+| `url` | Remote-URL (Streamable HTTP) oder leer für lokal | — |
+| `enabled` | Server aktivieren/deaktivieren | `true` |
+| `expose_to_agent` | Dem Assistenten als Tools anzeigen (mit Context) | `true` |
+| `timeout` | Timeout pro Tool-Aufruf in Sekunden | `60` |
+
+**Lokaler Server (stdio):** `command` + `args` setzen, `url` leer lassen.
+**Remote-Server (Streamable HTTP):** `url` setzen, `command` leer lassen.
+
+**"Mit Context" vs. "Raw" (expose_to_agent):**
+
+- `expose_to_agent: true` (**mit Context**): Der Assistent sieht die Tools, kann sie eigenständig aufrufen und die Ergebnisse interpretieren. Tool-Namen im Assistenten: `mcp_<server>_<tool>`.
+- `expose_to_agent: false` (**raw**): Tools sind nicht für den Assistenten sichtbar. Für zukünftige interne Nutzung gedacht.
+
+**Beispiel: PdfCraft als PDF-Backend**
+
+```yaml
+mcp_servers:
+  pdfcraft:
+    command: "pdfcraft-cli"
+    args: ["mcp", "--root", "/home/user/dokumente"]
+    enabled: true
+    expose_to_agent: true
+    timeout: 60
+```
+
+Nach der Konfiguration kann der Assistent PDF-Operationen wie Text-Extraktion, Seiten-Manipulation, Kommentare und mehr durchführen — ganz ohne dass der Nutzer manuell Eingriffe vornimmt.
+
+**Hinweise:**
+
+- MCP-Server werden bei Bedarf automatisch gestartet (beim ersten Tool-Aufruf oder Tool-Discovery).
+- Server-Prozesse laufen persistent im Hintergrund und werden bei MiniAssistant-Beendigung sauber gestoppt.
+- Jeder Server erhält einen eindeutigen Namen, der im Tool-Namen vorkommt (`mcp_pdfcraft_text_extract`).
+
+---
+
 ## 16. Globale Fallback-Modelle
 
 Wenn das primäre Modell fehlschlägt (Timeout, HTTP-Fehler), werden Fallback-Modelle nacheinander versucht.

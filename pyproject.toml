@@ -49,6 +49,8 @@ js = ["playwright>=1.40"]
 mempalace = ["mempalace>=3.0"]
 # docs: Dokument-Anhaenge (PDF, DOCX) extrahieren. pypdfium2 rendert gescannte PDFs zu PNGs (Vision-Fallback).
 docs = ["pypdf>=4", "pypdfium2>=4", "python-docx>=1"]
+# mcp: MCP-Client fuer externe Tools (stdio + Streamable HTTP Transport)
+mcp = ["mcp>=1.0"]
 
 [project.scripts]
 miniassistant = "miniassistant.cli:main"
