@@ -587,6 +587,9 @@ _COMMON_CSS = """
   --success: #00b894; --warning: #fdcb6e; --danger: #d63031;
   --radius: 8px; --shadow: 0 2px 8px rgba(0,0,0,0.08);
   --input-bg: #fff;
+  --code-bg: #f0f0f0; --hint-bg: #fff9e6; --note-bg: #e8f5e9;
+  --badge-bg: #e8f0fe; --badge-fg: #1a56db; --badge-border: #a4c2f4;
+  --btn-edit-fg: #555; --btn-edit-border: #888; --btn-edit-hover: #eee;
 }
 [data-theme="dark"] {
   --bg: #1a1a2e; --card: #16213e; --text: #e0e0e0; --muted: #a0a0a0;
@@ -594,6 +597,9 @@ _COMMON_CSS = """
   --success: #51cf66; --warning: #fcc419; --danger: #ff6b6b;
   --shadow: 0 2px 8px rgba(0,0,0,0.3);
   --input-bg: #1a1a2e;
+  --code-bg: #2a2a4a; --hint-bg: #2a2a1e; --note-bg: #1e2a1e;
+  --badge-bg: #1e2a4a; --badge-fg: #8ab4f8; --badge-border: #3a4a7a;
+  --btn-edit-fg: #a0a0a0; --btn-edit-border: #555; --btn-edit-hover: #2a2a4a;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -602,6 +608,9 @@ _COMMON_CSS = """
     --success: #51cf66; --warning: #fcc419; --danger: #ff6b6b;
     --shadow: 0 2px 8px rgba(0,0,0,0.3);
     --input-bg: #1a1a2e;
+    --code-bg: #2a2a4a; --hint-bg: #2a2a1e; --note-bg: #1e2a1e;
+    --badge-bg: #1e2a4a; --badge-fg: #8ab4f8; --badge-border: #3a4a7a;
+    --btn-edit-fg: #a0a0a0; --btn-edit-border: #555; --btn-edit-hover: #2a2a4a;
   }
 }
 * { box-sizing: border-box; }
@@ -618,8 +627,7 @@ a:hover { text-decoration: underline; }
 .btn-primary:hover { background: var(--primary-hover); color: #fff; text-decoration: none; }
 .btn-outline { background: transparent; border: 1.5px solid var(--primary); color: var(--primary); }
 .btn-outline:hover { background: var(--primary); color: #fff; text-decoration: none; }
-.setup-hint { background: #fff9e6; padding: 0.8em 1em; border-radius: var(--radius); border-left: 4px solid var(--warning); margin-bottom: 1em; }
-[data-theme="dark"] .setup-hint { background: #2a2a1e; }
+.setup-hint { background: var(--hint-bg); padding: 0.8em 1em; border-radius: var(--radius); border-left: 4px solid var(--warning); margin-bottom: 1em; }
 .logo-row { display: flex; align-items: center; gap: 0.7em; margin-bottom: 0.5em; }
 .logo-row img { width: 48px; height: 48px; border-radius: 10px; }
 .logo-row h1 { margin: 0; font-size: 1.6em; }
@@ -1757,29 +1765,29 @@ async def schedules_page(request: Request):
     table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
     th {{ text-align: left; padding: 0.5em; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }}
     td {{ padding: 0.5em; border-bottom: 1px solid var(--border); }}
-    code {{ background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }}
+    code {{ background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }}
     .btn-del {{ background: none; border: 1.5px solid var(--danger); color: var(--danger); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; transition: background 0.15s; }}
     .btn-del:hover {{ background: var(--danger); color: #fff; }}
-    .badge-watch {{ display: inline-block; font-size: 0.75em; background: #e8f0fe; color: #1a56db;
-      border: 1px solid #a4c2f4; border-radius: 4px; padding: 0.05em 0.35em; margin-left: 0.3em; vertical-align: middle; }}
+    .badge-watch {{ display: inline-block; font-size: 0.75em; background: var(--badge-bg); color: var(--badge-fg);
+      border: 1px solid var(--badge-border); border-radius: 4px; padding: 0.05em 0.35em; margin-left: 0.3em; vertical-align: middle; }}
     details {{ cursor: pointer; }}
     details summary {{ display: inline; }}
-    details .prompt-full {{ margin-top: 0.4em; white-space: pre-wrap; word-break: break-word; padding: 0.4em; background: var(--bg-secondary, #f5f5f5); border-radius: 4px; font-size: 0.9em; }}
-    .btn-edit {{ background: none; border: 1.5px solid #888; color: #555; border-radius: 4px;
+    details .prompt-full {{ margin-top: 0.4em; white-space: pre-wrap; word-break: break-word; padding: 0.4em; background: var(--code-bg); border-radius: 4px; font-size: 0.9em; }}
+    .btn-edit {{ background: none; border: 1.5px solid var(--btn-edit-border); color: var(--btn-edit-fg); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; margin-right: 0.3em; transition: background 0.15s; }}
-    .btn-edit:hover {{ background: #eee; }}
-    .btn-run {{ background: none; border: 1.5px solid #2d8a4e; color: #2d8a4e; border-radius: 4px;
+    .btn-edit:hover {{ background: var(--btn-edit-hover); }}
+    .btn-run {{ background: none; border: 1.5px solid var(--success); color: var(--success); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; margin-right: 0.3em; transition: background 0.15s; }}
-    .btn-run:hover {{ background: #2d8a4e; color: #fff; }}
+    .btn-run:hover {{ background: var(--success); color: #fff; }}
     .btn-run:disabled {{ opacity: 0.5; cursor: default; }}
     .modal-overlay {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:1000; align-items:center; justify-content:center; }}
     .modal-overlay.open {{ display:flex; }}
-    .modal-box {{ background:#fff; border-radius:8px; padding:1.5em; max-width:540px; width:90%; box-shadow:0 4px 24px rgba(0,0,0,0.18); }}
+    .modal-box {{ background:var(--card); border-radius:8px; padding:1.5em; max-width:540px; width:90%; box-shadow:0 4px 24px rgba(0,0,0,0.18); }}
     .modal-box h2 {{ margin:0 0 0.8em; font-size:1.1em; }}
-    .modal-box textarea {{ width:100%; box-sizing:border-box; min-height:120px; font-size:0.95em; padding:0.5em; border:1px solid #ccc; border-radius:4px; resize:vertical; }}
+    .modal-box textarea {{ width:100%; box-sizing:border-box; min-height:120px; font-size:0.95em; padding:0.5em; border:1px solid var(--border); border-radius:4px; resize:vertical; }}
     .modal-box label {{ display:block; font-size:0.88em; color:var(--muted); margin-bottom:0.25em; margin-top:0.7em; }}
-    .modal-box input[type=text], .modal-box select {{ width:100%; box-sizing:border-box; font-size:0.93em; padding:0.4em 0.5em; border:1px solid #ccc; border-radius:4px; }}
+    .modal-box input[type=text], .modal-box select {{ width:100%; box-sizing:border-box; font-size:0.93em; padding:0.4em 0.5em; border:1px solid var(--border); border-radius:4px; }}
     .modal-actions {{ display:flex; gap:0.6em; justify-content:flex-end; margin-top:0.8em; }}
     </style>
     </head><body>
@@ -1979,7 +1987,7 @@ async def chat_page(request: Request):
     details.thinking {{ margin-top: 0.3em; font-size: 0.88em; color: var(--muted); }}
     details.thinking summary {{ cursor: pointer; font-weight: 500; }}
     .thinking-placeholder {{ color: var(--muted); font-style: italic; }}
-    .onboarding-notice {{ background: #fff9e6; padding: 0.6em 0.8em; border-radius: var(--radius); border-left: 4px solid var(--warning); font-size: 0.9em; margin-bottom: 0.5em; }}
+    .onboarding-notice {{ background: var(--hint-bg); padding: 0.6em 0.8em; border-radius: var(--radius); border-left: 4px solid var(--warning); font-size: 0.9em; margin-bottom: 0.5em; }}
     .chat-input {{ display: flex; gap: 0.5em; align-items: flex-end; padding-top: 0.6em; border-top: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }}
     .chat-input-row {{ display: flex; gap: 0.5em; align-items: flex-end; width: 100%; }}
     .chat-input textarea {{ flex: 1; padding: 0.55em 0.7em; border: 1.5px solid var(--border); border-radius: var(--radius);
@@ -3663,7 +3671,7 @@ async def onboarding_page(request: Request):
     .chat-input textarea:focus {{ border-color: var(--primary); }}
     .chat-input button {{ height: 2.5em; }}
     .chat-footer {{ font-size: 0.8em; color: var(--muted); padding-top: 0.3em; text-align: center; flex-shrink: 0; }}
-    #saveBox {{ padding: 0.7em 1em; background: #e8f5e9; border-radius: var(--radius); border-left: 4px solid var(--success);
+    #saveBox {{ padding: 0.7em 1em; background: var(--note-bg); border-radius: var(--radius); border-left: 4px solid var(--success);
                 display: none; flex-shrink: 0; margin-top: 0.5em; display: none; }}
     #saveBox .btn {{ margin-right: 0.5em; }}
     #saveStatus {{ font-size: 0.9em; }}
@@ -6756,17 +6764,16 @@ async def webhooks_page(request: Request):
     table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
     th {{ text-align: left; padding: 0.5em; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }}
     td {{ padding: 0.5em; border-bottom: 1px solid var(--border); vertical-align: top; }}
-    code {{ background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; word-break: break-all; }}
-    [data-theme="dark"] code {{ background: #2a2a4a; }}
+    code {{ background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; word-break: break-all; }}
     .btn-del {{ background: none; border: 1.5px solid var(--danger); color: var(--danger); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; transition: background 0.15s; }}
     .btn-del:hover {{ background: var(--danger); color: #fff; }}
-    .btn-edit {{ background: none; border: 1.5px solid #888; color: #555; border-radius: 4px;
+    .btn-edit {{ background: none; border: 1.5px solid var(--btn-edit-border); color: var(--btn-edit-fg); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; margin-right: 0.3em; transition: background 0.15s; }}
-    .btn-edit:hover {{ background: #eee; }}
-    .btn-run {{ background: none; border: 1.5px solid #2d8a4e; color: #2d8a4e; border-radius: 4px;
+    .btn-edit:hover {{ background: var(--btn-edit-hover); }}
+    .btn-run {{ background: none; border: 1.5px solid var(--success); color: var(--success); border-radius: 4px;
       cursor: pointer; padding: 0.15em 0.4em; font-size: 0.85em; line-height: 1; margin-right: 0.3em; transition: background 0.15s; }}
-    .btn-run:hover {{ background: #2d8a4e; color: #fff; }}
+    .btn-run:hover {{ background: var(--success); color: #fff; }}
     .btn-run:disabled {{ opacity: 0.5; cursor: default; }}
     .modal-overlay {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:1000; align-items:center; justify-content:center; }}
     .modal-overlay.open {{ display:flex; }}
@@ -7953,8 +7960,7 @@ async def rooms_page(request: Request):
     table {{ width: 100%; border-collapse: collapse; font-size: 0.92em; }}
     th {{ text-align: left; padding: 0.5em; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; }}
     td {{ padding: 0.5em; border-bottom: 1px solid var(--border); vertical-align: middle; }}
-    code {{ background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; word-break: break-all; }}
-    [data-theme="dark"] code {{ background: #2a2a4a; }}
+    code {{ background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; word-break: break-all; }}
     .mode-sel {{ padding: 0.25em 0.5em; font-size: 0.9em; }}
     .modes-help {{ background: var(--card); border-radius: 6px; padding: 0.7em 0.9em; margin: 0 0 1em; font-size: 0.88em; line-height: 1.5; }}
     .modes-help b {{ color: var(--text); }}
