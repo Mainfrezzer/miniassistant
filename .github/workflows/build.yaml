@@ -1,0 +1,129 @@
+name: Docker
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: '0 8 */1 * *'
+    
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build"
+        required: true
+    
+env:
+  DOCKER_ORG: ${{ github.actor }}
+  DOCKER_TITEL: Miniassistant
+  DOCKER_DESC: Schlanker lokaler Assistent mit Multi-Provider-Support
+  DOCKER_PACKAGE: miniassistant
+  DOCKER_SRC: https://github.com/${{ github.repository }}
+  DOCKER_LATEST: latest
+      
+jobs:
+  build:
+    name: Build on ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+            platform: linux/amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@v4    
+
+      - name: Get Meta
+        id: meta
+        run: |
+          echo REPO=$(echo ${{ github.actor }} | awk '{print tolower($0)}') >> $GITHUB_OUTPUT
+          echo REPO_NAME=${{ env.DOCKER_PACKAGE }} >> $GITHUB_OUTPUT
+          #echo REPO_VERSION=$(git describe --tags --always | sed 's/^v//') >> $GITHUB_OUTPUT
+          #echo REPO_VERSION=${{ inputs.tag }} >> $GITHUB_OUTPUT
+          echo REPO_VERSION=$(date +"%Y.%m.%d") >> $GITHUB_OUTPUT
+          echo DATE=$(date) >> $GITHUB_OUTPUT
+
+      - name: Login GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: ${{ matrix.platform }}
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.REPO }}/${{ steps.meta.outputs.REPO_NAME }}:${{ steps.meta.outputs.REPO_VERSION }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.authors=${{ github.actor }}
+            org.opencontainers.image.url=${{ env.DOCKER_SRC }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=${{ env.DOCKER_TITEL }}
+            org.opencontainers.image.description=${{ env.DOCKER_DESC }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.DATE }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.REPO_VERSION }}
+          provenance: false 
+
+  merge:
+    name: Merge multi-arch image
+    runs-on: ubuntu-latest
+    needs: build
+
+    permissions:
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      
+
+      - name: Get Meta
+        id: meta
+        run: |
+          echo REPO=$(echo ${{ github.actor }} | awk '{print tolower($0)}') >> $GITHUB_OUTPUT
+          echo REPO_NAME=${{ env.DOCKER_PACKAGE }} >> $GITHUB_OUTPUT
+          #echo REPO_VERSION=$(git describe --tags --always | sed 's/^v//') >> $GITHUB_OUTPUT
+          #echo REPO_VERSION=${{ inputs.tag }} >> $GITHUB_OUTPUT
+          echo REPO_VERSION=$(date +"%Y.%m.%d") >> $GITHUB_OUTPUT
+
+      - name: Login GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create and push manifest (GHCR)
+        run: |
+          IMAGE=ghcr.io/${{ steps.meta.outputs.REPO }}/${{ steps.meta.outputs.REPO_NAME }}
+          TAG=${{ steps.meta.outputs.REPO_VERSION }}
+
+          docker manifest create $IMAGE:$TAG \
+            --amend $IMAGE:$TAG-amd64 \
+            --amend $IMAGE:$TAG-arm64
+
+          docker manifest push $IMAGE:$TAG
+
+          docker manifest create $IMAGE:latest \
+            --amend $IMAGE:$TAG-amd64 \
+            --amend $IMAGE:$TAG-arm64
+
+          docker manifest push $IMAGE:latest
