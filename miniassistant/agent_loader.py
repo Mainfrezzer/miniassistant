@@ -169,6 +169,31 @@ def _system_and_runtime_section(is_root: bool) -> str:
     return f"## System\n**Heute:** {date_str}\n\n" + body + "\n"
 
 
+def _client_system_section(client_info: dict[str, str] | None, local_tools: list[str] | None) -> str:
+    """Client-System-Info für lokale Tool-Ausführung (nur wenn client_info vorhanden)."""
+    if not client_info or not local_tools:
+        return ""
+    os_name = client_info.get("os", "")
+    arch = client_info.get("arch", "")
+    hostname = client_info.get("hostname", "")
+    # OS-spezifische Hinweise für Tool-Befehle
+    pkg_hint = ""
+    if os_name == "linux":
+        pkg_hint = "Pkg: **apt** oder **dnf**. Init: **systemd**."
+    elif os_name == "darwin":
+        pkg_hint = "Pkg: **brew** (Homebrew). Init: **launchd**."
+    elif os_name == "windows":
+        pkg_hint = "Pkg: **winget** oder **choco**. Shell: **cmd/powershell**."
+    lines = [
+        "## Client-System (lokale Tool-Ausführung)",
+        f"Tools ({', '.join(local_tools)}) laufen auf dem Client, nicht auf dem Server:",
+        f"- **{os_name}** ({arch})" + (f", Host: **{hostname}**" if hostname else ""),
+    ]
+    if pkg_hint:
+        lines.append(f"- {pkg_hint}")
+    return "\n".join(lines) + "\n"
+
+
 def _safety_section() -> str:
     """Liest basic_rules/safety.md und injiziert den Inhalt."""
     rule = _get_rule("safety.md")
@@ -1375,10 +1400,24 @@ def _vision_section(config: dict[str, Any], current_model: str | None = None) ->
         models_str = ", ".join(f"`{m}`" for m in img_gen_models)
         # Konkretes Aufruf-Beispiel mit erstem Modellnamen statt Platzhalter
         example_model = img_gen_models[0]
+        # Bevorzugtes Edit-Modell (image_edit_model) — nur wenn es in der Liste ist, sonst Beispiel = erstes Modell
+        _edit_pref = str(config.get("image_edit_model") or "").strip()
+        edit_example = next((_m for _m in img_gen_models
+                             if _m.strip().lower() == _edit_pref.lower()
+                             or _m.split("/", 1)[-1].strip().lower() == _edit_pref.lower()), example_model) if _edit_pref else example_model
         lines.append(f"- **Image generation & editing models:** {models_str}.")
-        lines.append(f"  Generate images: `invoke_model(model='{example_model}', message='YOUR PROMPT')`")
-        lines.append(f"  Edit images (img2img): `invoke_model(model='{example_model}', message='EDIT PROMPT', image_path='/path/to/source.png')`")
-        lines.append("  Pick the model that fits the task — first entry is the default.")
+        if edit_example != example_model:
+            # Edit-Regel direkt nach der Modell-Liste: die Liste enthält andere
+            # Bildmodelle (z.B. qwen-image-edit), die der LLM sonst fürs Edit greift
+            lines.append(f"  **Image EDITS (image_path set): ALWAYS use `{edit_example}` — never pick a different model for edits, "
+                         "even if other image models are listed. Exception ONLY if the USER explicitly names another model.**")
+            lines.append(f"  Edit images (img2img): `invoke_model(model='{edit_example}', message='EDIT PROMPT', image_path='/path/to/source.png')`")
+            lines.append(f"  Generate images: `invoke_model(model='{example_model}', message='YOUR PROMPT')`")
+            lines.append("  Pick the model that fits the task — first entry is the generation default.")
+        else:
+            lines.append(f"  Generate images: `invoke_model(model='{example_model}', message='YOUR PROMPT')`")
+            lines.append(f"  Edit images (img2img): `invoke_model(model='{edit_example}', message='EDIT PROMPT', image_path='/path/to/source.png')`")
+            lines.append("  Pick the model that fits the task — first entry is the default.")
         lines.append(f"  **IMPORTANT: `model` is ALWAYS required for invoke_model.** Never omit it.")
         lines.append(f"  When user uploads an image, the path appears as `[Hochgeladenes Bild gespeichert unter:]` — use that path as `image_path`.")
         lines.append(f"  Optional parameters: `size`, `steps`, `cfg_scale`, `guidance`, `seed`, `negative_prompt`, `sampler`, `scheduler`, `strength`.")
@@ -1545,6 +1584,9 @@ def _render_advanced_prompt(
         "identity_block": identity_md,
         "user_block": (files.get("USER.md", "") or "") + "\n\n" + _safe(_user_session_section, config),
         "system_runtime": _safe(_system_and_runtime_section, is_root),
+        "client_system": _safe(_client_system_section,
+                               config.get("_client_info"),
+                               config.get("_client_tools")),
         "memory_block": _safe(_memory_section, project_dir, config),
         "prefs_block": _safe(_prefs_section, config),
         "vision_block": _safe(_vision_section, config, current_model),

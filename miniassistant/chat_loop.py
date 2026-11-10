@@ -3835,6 +3835,18 @@ def _run_tool(
             from miniassistant.ollama_client import get_image_generation_models as _auto_img_models
             _img_models_early = _auto_img_models(config) or []
             _img_default = _img_models_early[0] if _img_models_early else ""
+            # Bild-Edit (image_path gesetzt): bevorzugtes Edit-Modell aus image_edit_model,
+            # muss aber ein Eintrag aus image_generation: sein (Whitelist), sonst Fallback
+            # auf erstes Listenelement (alte Methode).
+            _pref_edit = str(config.get("image_edit_model") or "").strip()
+            if _has_img_path_early and _pref_edit and _img_models_early:
+                _pe_l = _pref_edit.lower()
+                _hit = next((_m for _m in _img_models_early
+                             if _m.strip().lower() == _pe_l or _m.split("/", 1)[-1].strip().lower() == _pe_l), "")
+                if _hit:
+                    _img_default = _hit
+                else:
+                    _log.warning("invoke_model: image_edit_model '%s' not in image_generation list — using first entry", _pref_edit)
             _img_param_keys = ("size", "steps", "seed", "cfg_scale", "guidance",
                                "strength", "negative_prompt", "sampler", "scheduler")
             _has_img_param = any(arguments.get(_k) not in (None, "") for _k in _img_param_keys)
@@ -7705,6 +7717,10 @@ def chat_round_stream(
                 yield {"type": "status", "message": f"Tool: {tn}"}
 
         # Client-seitige Tool-Ausführung (Round-Trip): yield tool_request, warte auf Ergebnis
+        _client_info = config.get("_client_info") or {}
+        _executed_on = ""
+        if _client_info.get("hostname"):
+            _executed_on = f"client: {_client_info['hostname']} ({_client_info.get('os', '?')}/{_client_info.get('arch', '?')})"
         for _ct_name, _ct_args in _client_calls:
             import uuid as _uuid
             _req_id = str(_uuid.uuid4())
@@ -7715,7 +7731,7 @@ def chat_round_stream(
                 # Timeout oder Fehler → serverseitig nachholen
                 _server_calls = list(_server_calls) + [(_ct_name, _ct_args)]
                 continue
-            _aal.log_tool_call(config, _ct_name, _ct_args, _ct_result)
+            _aal.log_tool_call(config, _ct_name, _ct_args, _ct_result, executed_on=_executed_on)
             msgs.append({"role": "tool", "tool_name": _ct_name, "content": _ct_result})
 
         # Tool-Call-Dedup: identische (name, args) zweimal in einer Conversation → block.

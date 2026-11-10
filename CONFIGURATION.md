@@ -1765,6 +1765,7 @@ Pro Request lässt sich Strength zusätzlich via Tool-Parameter `strength` bzw. 
 
 | Key | Typ | Default | Beschreibung |
 |-----|-----|---------|-------------|
+| `image_edit_model` | string | — | Bevorzugtes Edit-Modell (z. B. `"llama-swap/flux.2-klein"`). Muss ein Eintrag der `image_generation:`-Liste sein. Wird automatisch genommen, wenn `image_path` gesetzt ist und kein `model` übergeben wird; sonst Fallback auf erstes Listenelement. |
 | `image_edit_strength` | float | `1.0` | Denoise-Stärke beim Edit (0–1). Global / Provider / `model_options`. |
 | `image_edit_max_edge` | integer | `2048` | Längste Kante der Quelle wird beim Edit darauf gecappt (verhindert OOM bei 4K-Quellen). |
 

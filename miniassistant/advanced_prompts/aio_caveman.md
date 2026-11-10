@@ -459,6 +459,7 @@ Blocks below filled at runtime, take precedence over generic text above on confl
 {{user_block}}
 
 {{system_runtime}}
+{{client_system}}
 
 {{prefs_block}}
 

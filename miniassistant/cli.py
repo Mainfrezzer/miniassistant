@@ -349,6 +349,17 @@ def config_cmd(ctx: click.Context) -> None:
         else:
             config.pop("image_generation", None)
 
+        # Bevorzugtes Edit-Modell (nur wenn Bildmodelle konfiguriert)
+        if config.get("image_generation"):
+            edit_input = _prompt_text(
+                "Bevorzugtes Bild-Edit-Modell (muss eines der Bildgenerierungs-Modelle sein – leer = erstes Listenelement)",
+                default=str(config.get("image_edit_model") or ""), use_questionary=_use_q,
+            )
+            if edit_input.strip():
+                config["image_edit_model"] = edit_input.strip()
+            else:
+                config.pop("image_edit_model", None)
+
         max_chars_str = _prompt_text("Max Zeichen pro Agent-Datei (SOUL.md, IDENTITY.md, … – begrenzt wie viel davon in den System-Prompt geladen wird)", default=str(config.get("max_chars_per_file", DEFAULT_MAX_CHARS_PER_FILE)), use_questionary=_use_q)
         try:
             config["max_chars_per_file"] = int(max_chars_str.strip()) if max_chars_str.strip() else DEFAULT_MAX_CHARS_PER_FILE
