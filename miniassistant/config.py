@@ -44,8 +44,9 @@ _PASSTHROUGH_TUNING_KEYS = (
     # (Core + Direction-Keywords). Beide default true.
     "schedule_slim_prompt", "schedule_lazy_tools",
     # Image-Edit-Tuning: strength-Default (1.0 = voller Denoise, nötig damit qwen-image-edit
-    # & Co. die Instruktion anwenden); max_edge cappt Quell-Auflösung.
-    "image_edit_strength", "image_edit_max_edge",
+    # & Co. die Instruktion anwenden); max_edge cappt Quell-Auflösung; image_edit_model ist
+    # das bevorzugte Edit-Modell (muss Eintrag der image_generation:-Liste sein).
+    "image_edit_strength", "image_edit_max_edge", "image_edit_model",
     # Ideogram-4 & Co.: Modelle mit eingebautem Safety-Filter, der Plain-Text-Prompts
     # oft false-positiv blockt (graues "Image blocked by safety filter"-PNG statt Bild).
     # Prompts an diese Modelle werden in das strukturierte JSON-Caption-Format gewrappt

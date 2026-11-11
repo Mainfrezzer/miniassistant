@@ -1240,6 +1240,7 @@ async def config_form_page(request: Request):
         {{ n:"doc_max_chars", t:"int", l:"doc_max_chars" }},
         {{ n:"doc_max_pages_render", t:"int", l:"doc_max_pages_render" }},
         {{ n:"image_edit_strength", t:"float", l:"image_edit_strength (global, 0-1; 1.0 = voller Denoise. Pro Modell via model_options im Raw-YAML)" }},
+        {{ n:"image_edit_model", t:"text", l:"image_edit_model (bevorzugtes Edit-Modell, muss in image_generation: sein; sonst erstes Listenelement)" }},
         {{ n:"image_edit_max_edge", t:"int", l:"image_edit_max_edge (max. Kantenlänge Quellbild beim Edit, Default 2048)" }},
         {{ n:"image_json_prompt_models", t:"list_inline", l:"image_json_prompt_models (JSON-Prompt-Wrap gegen Safety-Filter-False-Positives; Modelle mit 'ideogram' im Namen sind IMMER aktiv, Liste ergänzt weitere)" }},
     ]}},
@@ -3196,6 +3197,23 @@ async def api_chat_stream(request: Request):
         session["config"].pop("_client_tools", None)
         session["config"].pop("_tool_request_hook", None)
 
+    # Client-System-Info (miniclient): Für korrekte Tool-Befehle auf Remote-System
+    _client_info = body.get("client_info")
+    if _client_info and isinstance(_client_info, dict):
+        session["config"]["_client_info"] = {
+            "os": str(_client_info.get("os", "")),
+            "arch": str(_client_info.get("arch", "")),
+            "hostname": str(_client_info.get("hostname", "")),
+        }
+        # client_mode Scope für Usage-Tracking setzen
+        _cc = session["config"].setdefault("_chat_context", {})
+        _cc["client_mode"] = True
+    else:
+        session["config"].pop("_client_info", None)
+        _cc = session["config"].get("_chat_context")
+        if isinstance(_cc, dict):
+            _cc.pop("client_mode", None)
+
     # Bilder aus Body extrahieren und validieren
     _raw_images = body.get("images")
     _chat_images = None
@@ -4473,9 +4491,9 @@ async def api_usage(request: Request):
     _require_token(request)
     from_str = request.query_params.get("from")
     to_str = request.query_params.get("to")
-    # scopes=owner,group,raw — leer/fehlend = alle
+    # scopes=owner,group,raw,client — leer/fehlend = alle
     _scopes_raw = (request.query_params.get("scopes") or "").strip()
-    scopes = {s for s in (_scopes_raw.split(",") if _scopes_raw else []) if s in ("owner", "group", "raw")} or None
+    scopes = {s for s in (_scopes_raw.split(",") if _scopes_raw else []) if s in ("owner", "group", "raw", "client")} or None
     if from_str and to_str:
         from datetime import datetime
         from miniassistant.usage import get_usage_for_range
@@ -4564,6 +4582,7 @@ async def nutzung_page(request: Request):
         <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="owner" checked> Kontext</label>
         <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="group" checked> Gruppen</label>
         <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="raw" checked> Raw</label>
+        <label style="display:inline-flex;align-items:center;gap:0.25em;font-size:0.85em;"><input type="checkbox" class="scope-cb" value="client" checked> Client</label>
       </div>
       <div class="summary-cards">
         <div class="summary-card"><div class="label">Gesamtzeit</div><div class="value" id="sum-time">—</div></div>
@@ -4571,6 +4590,7 @@ async def nutzung_page(request: Request):
         <div class="summary-card"><div class="label">Modelle</div><div class="value" id="sum-models">—</div></div>
         <div class="summary-card" id="sum-group-card" style="display:none;background:rgba(168,85,247,0.08);border-color:rgba(168,85,247,0.3);"><div class="label">Davon Gruppen</div><div class="value" id="sum-group-time">—</div><div style="font-size:0.75em;color:var(--muted);margin-top:0.2em;" id="sum-group-req"></div></div>
         <div class="summary-card" id="sum-raw-card" style="display:none;background:rgba(34,197,94,0.08);border-color:rgba(34,197,94,0.3);"><div class="label">Davon Raw-Proxy</div><div class="value" id="sum-raw-time">—</div><div style="font-size:0.75em;color:var(--muted);margin-top:0.2em;" id="sum-raw-req"></div></div>
+        <div class="summary-card" id="sum-client-card" style="display:none;background:rgba(59,130,246,0.08);border-color:rgba(59,130,246,0.3);"><div class="label">Davon Miniclient</div><div class="value" id="sum-client-time">—</div><div style="font-size:0.75em;color:var(--muted);margin-top:0.2em;" id="sum-client-req"></div></div>
       </div>
       <div class="chart-container"><canvas id="usage-chart"></canvas></div>
       <div class="tables-row">
@@ -4690,6 +4710,17 @@ async def nutzung_page(request: Request):
               document.getElementById("sum-raw-req").textContent = (data.summary.raw_requests || 0) + " Anfragen · " + rpct + "% Gesamt";
             }} else {{
               rawCard.style.display = "none";
+            }}
+            // Client-Card nur wenn client_seconds > 0
+            var cliCard = document.getElementById("sum-client-card");
+            var cliSec = data.summary.client_seconds || 0;
+            if (cliSec > 0) {{
+              cliCard.style.display = "";
+              document.getElementById("sum-client-time").textContent = data.summary.client_formatted || "0s";
+              var cpct = data.summary.total_seconds > 0 ? Math.round(cliSec / data.summary.total_seconds * 100) : 0;
+              document.getElementById("sum-client-req").textContent = (data.summary.client_requests || 0) + " Anfragen · " + cpct + "% Gesamt";
+            }} else {{
+              cliCard.style.display = "none";
             }}
 
             // Chart

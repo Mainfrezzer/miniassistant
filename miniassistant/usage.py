@@ -28,6 +28,8 @@ def record(config: dict, model: str, call_type: str, duration_s: float) -> None:
     _cc = config.get("_chat_context") or {}
     if _cc.get("raw_mode"):
         scope = "raw"
+    elif _cc.get("client_mode"):
+        scope = "client"
     elif _cc.get("group_mode"):
         scope = "group"
     else:
@@ -123,7 +125,8 @@ def aggregate(entries: list[dict], group_by: str = "day") -> dict:
         return {
             "summary": {"total_seconds": 0, "total_requests": 0, "formatted": "0s",
                          "group_seconds": 0, "group_requests": 0, "group_formatted": "0s",
-                         "raw_seconds": 0, "raw_requests": 0, "raw_formatted": "0s"},
+                         "raw_seconds": 0, "raw_requests": 0, "raw_formatted": "0s",
+                         "client_seconds": 0, "client_requests": 0, "client_formatted": "0s"},
             "by_time": [],
             "by_model": [],
             "by_type": [],
@@ -182,13 +185,16 @@ def aggregate(entries: list[dict], group_by: str = "day") -> dict:
         key=lambda x: x["seconds"], reverse=True,
     )
 
-    # --- group/raw totals (für summary cards — nur sichtbar wenn >0) ---
+    # --- group/raw/client totals (für summary cards — nur sichtbar wenn >0) ---
     group_entries = [e for e in entries if e.get("scope") == "group"]
     group_s = sum(e["seconds"] for e in group_entries)
     group_n = len(group_entries)
     raw_entries = [e for e in entries if e.get("scope") == "raw"]
     raw_s = sum(e["seconds"] for e in raw_entries)
     raw_n = len(raw_entries)
+    client_entries = [e for e in entries if e.get("scope") == "client"]
+    client_s = sum(e["seconds"] for e in client_entries)
+    client_n = len(client_entries)
 
     return {
         "summary": {
@@ -201,6 +207,9 @@ def aggregate(entries: list[dict], group_by: str = "day") -> dict:
             "raw_seconds": round(raw_s, 2),
             "raw_requests": raw_n,
             "raw_formatted": _fmt_seconds(raw_s),
+            "client_seconds": round(client_s, 2),
+            "client_requests": client_n,
+            "client_formatted": _fmt_seconds(client_s),
         },
         "by_time": by_time,
         "by_model": by_model,

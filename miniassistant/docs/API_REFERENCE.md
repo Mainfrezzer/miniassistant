@@ -87,6 +87,24 @@ curl -s -X POST http://localhost:8765/api/chat/tool_result \
 
 Timeout: 60 seconds. If no result is received, the server executes the tool itself as fallback.
 
+### Client system info
+
+When using `local_tools`, the client should send its system info so the assistant generates correct commands:
+
+```json
+{
+  "message": "...",
+  "local_tools": ["exec", "read_url"],
+  "client_info": {
+    "os": "darwin",
+    "arch": "arm64",
+    "hostname": "my-macbook"
+  }
+}
+```
+
+The server uses this to add system-specific hints to the prompt (e.g., `brew` for macOS, `winget` for Windows) and to log client-side tool execution.
+
 ## Useful for schedules
 
 In a schedule prompt, the assistant runs with full tool access. To trigger from bash (e.g. after a backup script):

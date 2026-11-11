@@ -241,7 +241,7 @@ def log_response(config: dict[str, Any], content: str, tps: tuple[float, bool] |
     _write_all(paths, f"[{_ts()}] RESPONSE{tps_str}\n{c}\n")
 
 
-def log_tool_call(config: dict[str, Any], tool_name: str, arguments: dict[str, Any], result: str) -> None:
+def log_tool_call(config: dict[str, Any], tool_name: str, arguments: dict[str, Any], result: str, executed_on: str = "") -> None:
     """Loggt einen Tool-Call (exec, web_search, schedule, etc.) — Start + Result zusammen (Legacy)."""
     paths = _log_paths(config)
     if not paths:
@@ -251,8 +251,9 @@ def log_tool_call(config: dict[str, Any], tool_name: str, arguments: dict[str, A
     if len(args_str) > 1000:
         args_str = args_str[:1000] + "…"
     res_str = result if len(result) <= 1000 else result[:1000] + "…"
+    suffix = f" [{executed_on}]" if executed_on else ""
     lines = [
-        f"[{_ts()}] TOOL  {tool_name}\n",
+        f"[{_ts()}] TOOL  {tool_name}{suffix}\n",
         f"  args: {args_str}\n",
         f"  result: {res_str}\n",
     ]

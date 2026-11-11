@@ -47,7 +47,9 @@ invoke_model(model='EXACT_NAME_FROM_LIST', message='make the sky sunset orange',
 - `0.7–1.0` = major changes (heavy transformation, almost new image)
 - **System default when omitted on edit calls: `1.0`** (configurable via `image_edit_strength`, per model/provider/global) — distill edit models (`flux-klein`, `qwen-image-edit`) behave ~bimodal: values below 1.0 often return the input nearly unchanged. Pass an explicit lower value only when the user asks for subtle changes.
 
-**Edit model auto-selection:** when `image_path` is set and `model` is not specified, the system uses the FIRST model in the `image_generation:` config list (user controls ordering). Explicit `model='…'` is always honored.
+**Edit model auto-selection:** when `image_path` is set and `model` is not specified, the system uses `image_edit_model` from the config if set (must be an entry of `image_generation:`, otherwise ignored); else the FIRST model in the `image_generation:` config list (user controls ordering). Explicit `model='…'` is always honored.
+
+**Agent rule:** if `image_edit_model` is configured, use it for ALL image edits (`image_path` set) — do not hand-pick other image models for editing. Only deviate when the user explicitly names a model.
 
 **Group-room path translation:** in group rooms, `image_path` must be a sandbox-relative path (`/workspace/...`). The system translates it to the host path under `<workspace>/groups/<sub>/` automatically. Refuses paths outside the room workspace.
 

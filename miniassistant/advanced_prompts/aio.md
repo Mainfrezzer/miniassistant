@@ -447,6 +447,7 @@ The blocks below are filled at runtime and take precedence over anything generic
 {{user_block}}
 
 {{system_runtime}}
+{{client_system}}
 
 {{prefs_block}}
 
